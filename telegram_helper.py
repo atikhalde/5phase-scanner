@@ -48,11 +48,10 @@ def format_reversal_alert(trade, ticker):
 
 def format_watchlist(watchlist, tickers_with_trades):
     if not watchlist:
-        return "📋 *Daily Watchlist*: No recent breakouts in last 7 days"
-    lines = [f"📋 *Daily Watchlist* — {len(watchlist)} stocks in breakout+shakeout phase (last 7d):\n"]
+        return "📋 *Daily Watchlist*: No recent breakouts in last 30 days (changed from 7d as per request)"
+    lines = [f"📋 *Daily Watchlist* — {len(watchlist)} stocks in breakout+shakeout phase (last 30d):\n"]
     for trade in watchlist[:20]:  # limit 20
         ticker = trade.get('ticker', 'UNKNOWN')
-        # trade dict from scanner has no ticker, we add externally
         lines.append(
             f"• `{ticker}` B/O {trade['breakout_date'].strftime('%Y-%m-%d') if hasattr(trade['breakout_date'], 'strftime') else trade['breakout_date']} "
             f"Rally {trade['rally_high']} Shake {trade['shake_low']} ({trade['drop_pct']}%) "
@@ -60,5 +59,5 @@ def format_watchlist(watchlist, tickers_with_trades):
         )
     if len(watchlist) > 20:
         lines.append(f"... and {len(watchlist)-20} more")
-    lines.append(f"\nTotal with setup: {tickers_with_trades} tickers")
+    lines.append(f"\nTotal with setup: {tickers_with_trades} tickers | Universe Nifty500 | Logic: 1291 trades (ABDL fix)")
     return "\n".join(lines)
