@@ -9,17 +9,13 @@ Phase4a: Rally continuation 1-7 days after breakout, rally_high > breakout_high*
 Phase4b: Shakeout low after rally, low VolRatio<1.0, drop 4-25% from shake_high (max high breakout to low)
 Phase5: Reversal bullish close>prev high and >shake_low high + VolRatio>0.6 and increasing
 
-This version produced 1291 trades on 2075 EQ, ABDL 0, CNL 23/07 low 867 Vol 0.07 reversal 24/07 Vol 9.21 correct,
-AEGISVOPAK 17/07 hammer/doji -> entry 20/07 correct per user.
-
-Updated: Watchlist window changed from 7 to 30 days as per user request
+Watchlist logic: breakout in last 30 days (or 60 if none), reversal not yet fired (reversal_date > today) = waiting reversal
 """
 
 import pandas as pd
 import numpy as np
 
 def prepare_df(hist_df):
-    """hist_df must have Date, Open, High, Low, Close, Volume"""
     df = hist_df.copy().sort_values('Date').reset_index(drop=True)
     df['VolMA20'] = df['Volume'].rolling(20).mean()
     df['VolRatio'] = df['Volume'] / df['VolMA20']
@@ -30,9 +26,6 @@ def prepare_df(hist_df):
     return df
 
 def scan_5phase(df, dry_thresh=8, vol_break=1.5, vol_shake_max=1.0, vol_rev_min=0.6, drop_min=4, drop_max=25):
-    """
-    Returns list of trades with full details
-    """
     if len(df) < 250:
         return []
     df = prepare_df(df)
@@ -46,7 +39,6 @@ def scan_5phase(df, dry_thresh=8, vol_break=1.5, vol_shake_max=1.0, vol_rev_min=
         if i < 180:
             i += 1
             continue
-        # Phase1 Anchor
         anchor_window = df.iloc[i-180:i-90]
         anchor_high = anchor_window['High'].max()
         if pd.isna(anchor_high):
@@ -57,16 +49,13 @@ def scan_5phase(df, dry_thresh=8, vol_break=1.5, vol_shake_max=1.0, vol_rev_min=
         if days_since < 90 or days_since > 180:
             i += 1
             continue
-        # not broken by CLOSE last 90 days
         last90 = df.iloc[i-90:i]
         if last90['Close'].max() >= anchor_high:
             i += 1
             continue
-        # Phase2 Dry
         if df.loc[i-1, 'Dry90'] < dry_thresh:
             i += 1
             continue
-        # Phase3 Breakout
         close_b = df.loc[i, 'Close']
         vol_b = df.loc[i, 'VolRatio']
         if pd.isna(vol_b):
@@ -75,7 +64,6 @@ def scan_5phase(df, dry_thresh=8, vol_break=1.5, vol_shake_max=1.0, vol_rev_min=
         if not (close_b > anchor_high and vol_b > vol_break and close_b > df.loc[i, 'EMA50']):
             i += 1
             continue
-        # Phase4a Rally continuation 1-7 days after breakout, must be >1% higher to prove survival (ABDL fix)
         rally_end = min(i+8, n)
         rally_window = df.iloc[i+1:rally_end]
         if len(rally_window) == 0:
@@ -85,9 +73,8 @@ def scan_5phase(df, dry_thresh=8, vol_break=1.5, vol_shake_max=1.0, vol_rev_min=
         breakout_high = df.loc[i, 'High']
         if rally_high < breakout_high * 1.01:
             i += 1
-            continue  # failed breakout like ABDL
+            continue
         rally_idx = rally_window[rally_window['High'] == rally_high].index[-1]
-        # Phase4b Shakeout low after rally, low vol
         shake_start = rally_idx + 1
         shake_end = min(rally_idx + 16, n)
         shake_window = df.iloc[shake_start:shake_end]
@@ -107,7 +94,6 @@ def scan_5phase(df, dry_thresh=8, vol_break=1.5, vol_shake_max=1.0, vol_rev_min=
         if drop < drop_min or drop > drop_max:
             i += 1
             continue
-        # Phase5 Reversal
         rev_window = df.iloc[low_idx+1:min(low_idx+16, n)]
         for j, rev in rev_window.iterrows():
             if pd.isna(rev['VolRatio']):
@@ -115,7 +101,6 @@ def scan_5phase(df, dry_thresh=8, vol_break=1.5, vol_shake_max=1.0, vol_rev_min=
             if rev['Close'] <= rev['Open']:
                 continue
             prev_high = df.iloc[j-1]['High'] if j > 0 else 0
-            # close > prev high and > shake low high and vol increasing and >0.6
             if rev['Close'] > prev_high and rev['Close'] > low_row['High'] and rev['VolRatio'] > vol_rev_min and rev['VolRatio'] > low_row['VolRatio'] * 0.8:
                 trades.append({
                     'anchor_date': df.loc[anchor_idx, 'Date'],
@@ -144,14 +129,33 @@ def scan_5phase(df, dry_thresh=8, vol_break=1.5, vol_shake_max=1.0, vol_rev_min=
             i += 1
     return trades
 
+def get_watchlist(trades, today, days=30, only_waiting=True):
+    """
+    Watchlist logic:
+    - breakout in last `days` days
+    - if only_waiting True: reversal_date > today (waiting for reversal, not yet fired)
+    - else: includes past reversals too
+    """
+    watchlist = []
+    for tr in trades:
+        try:
+            bdate = tr['breakout_date'].date() if hasattr(tr['breakout_date'], 'date') else pd.to_datetime(tr['breakout_date']).date()
+            rdate = tr['reversal_date'].date() if hasattr(tr['reversal_date'], 'date') else pd.to_datetime(tr['reversal_date']).date()
+            delta = (today - bdate).days
+            if 0 < delta <= days:
+                if only_waiting:
+                    # Only if reversal not yet fired (future)
+                    if rdate > today:
+                        watchlist.append(tr)
+                else:
+                    watchlist.append(tr)
+        except:
+            continue
+    return watchlist
+
 def check_today_events(df):
-    """
-    For daily scanner live alerts:
-    Returns dict with breakout_today, watchlist (breakout in last 30 days - changed from 7 as per user request), reversal_today
-    Uses same conditions but checks today only
-    """
     if len(df) < 250:
-        return {'breakout_today': None, 'watchlist': [], 'reversal_today': None, 'all_trades': []}
+        return {'breakout_today': None, 'watchlist': [], 'reversal_today': None, 'all_trades': [], 'watchlist_30': [], 'watchlist_60': []}
     df_prep = prepare_df(df)
     trades = scan_5phase(df_prep)
     if not df_prep.empty:
@@ -166,20 +170,20 @@ def check_today_events(df):
             if tr['reversal_date'].date() == today:
                 reversal_today = tr
                 break
-        # Watchlist: breakout in last 30 days (changed from 7 as per user request)
-        watchlist = []
-        for tr in trades:
-            delta = (today - tr['breakout_date'].date()).days
-            if 0 < delta <= 30:  # Changed from 7 to 30
-                if tr['rally_high_date'].date() <= today <= tr['reversal_date'].date() or tr['breakout_date'].date() <= today < tr['reversal_date'].date():
-                    watchlist.append(tr)
-        recent_breakouts = [tr for tr in trades if (today - tr['breakout_date'].date()).days <= 30 and (today - tr['breakout_date'].date()).days >=0]
-        watchlist_dict = { (w['breakout_date'], w['anchor_high']): w for w in watchlist + recent_breakouts }
-        watchlist = list(watchlist_dict.values())
+        # Watchlist 30 days waiting
+        watchlist_30 = get_watchlist(trades, today, days=30, only_waiting=True)
+        # If no breakout in 30 days, expand to 60 days
+        watchlist_60 = []
+        if not watchlist_30:
+            watchlist_60 = get_watchlist(trades, today, days=60, only_waiting=True)
+        # Combined for backward compat
+        watchlist = watchlist_30 if watchlist_30 else watchlist_60
         return {
             'breakout_today': breakout_today,
             'reversal_today': reversal_today,
             'watchlist': watchlist,
+            'watchlist_30': watchlist_30,
+            'watchlist_60': watchlist_60,
             'all_trades': trades
         }
-    return {'breakout_today': None, 'watchlist': [], 'reversal_today': None, 'all_trades': []}
+    return {'breakout_today': None, 'watchlist': [], 'reversal_today': None, 'all_trades': [], 'watchlist_30': [], 'watchlist_60': []}
