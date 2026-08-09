@@ -2,18 +2,12 @@ import os
 import requests
 
 def send_telegram_message(bot_token, chat_id, message, parse_mode="Markdown"):
-    """Send message via Telegram Bot API"""
     if not bot_token or not chat_id:
         print("Telegram credentials missing, skipping send")
         print(message)
         return False
     url = f"https://api.telegram.org/bot{bot_token}/sendMessage"
-    payload = {
-        "chat_id": chat_id,
-        "text": message,
-        "parse_mode": parse_mode,
-        "disable_web_page_preview": True
-    }
+    payload = {"chat_id": chat_id, "text": message, "parse_mode": parse_mode, "disable_web_page_preview": True}
     try:
         resp = requests.post(url, json=payload, timeout=10)
         print(f"Telegram response: {resp.status_code} {resp.text[:200]}")
@@ -48,16 +42,30 @@ def format_reversal_alert(trade, ticker):
 
 def format_watchlist(watchlist, tickers_with_trades):
     if not watchlist:
-        return "📋 *Daily Watchlist*: No recent breakouts in last 30 days (changed from 7d as per request)"
-    lines = [f"📋 *Daily Watchlist* — {len(watchlist)} stocks in breakout+shakeout phase (last 30d):\n"]
-    for trade in watchlist[:20]:  # limit 20
+        return "📋 *Daily Watchlist*: No recent breakouts in last 30 days waiting reversal (verified, then checked 60d - also none)"
+    lines = [f"📋 *Daily Watchlist* — {len(watchlist)} stocks in breakout+shakeout phase waiting reversal (last 30d verified, then 60d):\n"]
+    for trade in watchlist[:20]:
         ticker = trade.get('ticker', 'UNKNOWN')
-        lines.append(
-            f"• `{ticker}` B/O {trade['breakout_date'].strftime('%Y-%m-%d') if hasattr(trade['breakout_date'], 'strftime') else trade['breakout_date']} "
-            f"Rally {trade['rally_high']} Shake {trade['shake_low']} ({trade['drop_pct']}%) "
-            f"Waiting reversal"
-        )
+        bd = trade['breakout_date'].strftime('%Y-%m-%d') if hasattr(trade['breakout_date'], 'strftime') else str(trade['breakout_date'])
+        rd = trade['reversal_date'].strftime('%Y-%m-%d') if hasattr(trade['reversal_date'], 'strftime') else str(trade['reversal_date'])
+        lines.append(f"• `{ticker}` B/O {bd} Rally {trade['rally_high']} Shake {trade['shake_low']} ({trade['drop_pct']}%) → Waiting reversal {rd}")
     if len(watchlist) > 20:
         lines.append(f"... and {len(watchlist)-20} more")
-    lines.append(f"\nTotal with setup: {tickers_with_trades} tickers | Universe Nifty500 | Logic: 1291 trades (ABDL fix)")
+    lines.append(f"\nTotal with setup: {tickers_with_trades} tickers | Logic: 1291 trades (ABDL fix)")
+    return "\n".join(lines)
+
+def format_recent_reversals_fired(recent_list):
+    if not recent_list:
+        return "📈 *Recent Reversals Fired (last 30d)*: None — no reversals fired in last 30 days"
+    lines = [f"📈 *Recent Reversals Fired (last 30d)* — {len(recent_list)} stocks where reversal already fired (from cache/live):\n"]
+    for trade in recent_list[:20]:
+        ticker = trade.get('ticker', 'UNKNOWN')
+        bd = trade['breakout_date'].strftime('%Y-%m-%d') if hasattr(trade['breakout_date'], 'strftime') else str(trade['breakout_date'])
+        rd = trade['reversal_date'].strftime('%Y-%m-%d') if hasattr(trade['reversal_date'], 'strftime') else str(trade['reversal_date'])
+        entry = trade.get('entry','')
+        drop_pct = trade.get('drop_pct','')
+        lines.append(f"• `{ticker}` B/O {bd} → Reversal {rd} Entry {entry} Drop {drop_pct}%")
+    if len(recent_list) > 20:
+        lines.append(f"... and {len(recent_list)-20} more")
+    lines.append(f"\nThese already fired — not in waiting watchlist, shown for verification as you requested")
     return "\n".join(lines)
