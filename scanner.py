@@ -11,6 +11,8 @@ Phase5: Reversal bullish close>prev high and >shake_low high + VolRatio>0.6 and 
 
 This version produced 1291 trades on 2075 EQ, ABDL 0, CNL 23/07 low 867 Vol 0.07 reversal 24/07 Vol 9.21 correct,
 AEGISVOPAK 17/07 hammer/doji -> entry 20/07 correct per user.
+
+Updated: Watchlist window changed from 7 to 30 days as per user request
 """
 
 import pandas as pd
@@ -145,41 +147,33 @@ def scan_5phase(df, dry_thresh=8, vol_break=1.5, vol_shake_max=1.0, vol_rev_min=
 def check_today_events(df):
     """
     For daily scanner live alerts:
-    Returns dict with breakout_today, watchlist (breakout in last 7 days), reversal_today
+    Returns dict with breakout_today, watchlist (breakout in last 30 days - changed from 7 as per user request), reversal_today
     Uses same conditions but checks today only
     """
     if len(df) < 250:
         return {'breakout_today': None, 'watchlist': [], 'reversal_today': None, 'all_trades': []}
     df_prep = prepare_df(df)
     trades = scan_5phase(df_prep)
-    # Convert dates to date only for comparison
     if not df_prep.empty:
         today = df_prep.iloc[-1]['Date'].date()
-        # Breakout today?
         breakout_today = None
         for tr in trades:
             if tr['breakout_date'].date() == today:
                 breakout_today = tr
                 break
-        # Reversal today?
         reversal_today = None
         for tr in trades:
             if tr['reversal_date'].date() == today:
                 reversal_today = tr
                 break
-        # Watchlist: breakout in last 7 days, not yet reversed or reversal in future?
-        # For simplicity: trades where breakout_date within last 7 trading days and reversal_date > today or no reversal yet
-        # Here we list trades where breakout in last 7 days
+        # Watchlist: breakout in last 30 days (changed from 7 as per user request)
         watchlist = []
         for tr in trades:
             delta = (today - tr['breakout_date'].date()).days
-            if 0 < delta <= 7:
-                # check if currently in shakeout phase (today between rally_high and reversal)
+            if 0 < delta <= 30:  # Changed from 7 to 30
                 if tr['rally_high_date'].date() <= today <= tr['reversal_date'].date() or tr['breakout_date'].date() <= today < tr['reversal_date'].date():
                     watchlist.append(tr)
-        # Also include recent breakouts last 7 days even if not in shakeout yet
-        recent_breakouts = [tr for tr in trades if (today - tr['breakout_date'].date()).days <= 7 and (today - tr['breakout_date'].date()).days >=0]
-        # Merge
+        recent_breakouts = [tr for tr in trades if (today - tr['breakout_date'].date()).days <= 30 and (today - tr['breakout_date'].date()).days >=0]
         watchlist_dict = { (w['breakout_date'], w['anchor_high']): w for w in watchlist + recent_breakouts }
         watchlist = list(watchlist_dict.values())
         return {
