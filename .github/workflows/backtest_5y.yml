@@ -1,0 +1,46 @@
+name: 5-Year Backtest (1291 Logic) + PDF Report
+
+on:
+  workflow_dispatch:
+  schedule:
+    # Weekly on Sunday at 2 AM UTC to refresh backtest PDF
+    - cron: '0 2 * * 0'
+
+jobs:
+  backtest:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout repo
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+
+      - name: Install dependencies
+        run: |
+          pip install --upgrade pip
+          pip install -r requirements.txt
+
+      - name: Run 5-year backtest
+        run: |
+          python backtest_5y.py
+
+      - name: Upload backtest artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: backtest-5y-${{ github.run_id }}
+          path: |
+            backtest_5y_nifty500.csv
+            backtest_5y_report.pdf
+            *_chart.png
+          if-no-files-found: warn
+
+      - name: Commit updated report (optional)
+        run: |
+          git config user.name "github-actions"
+          git config user.email "actions@github.com"
+          git add backtest_5y_nifty500.csv backtest_5y_report.pdf || true
+          git diff --quiet && git diff --staged --quiet || git commit -m "Update 5Y backtest report $(date +%Y-%m-%d)"
+          git push || echo "No push permission or no changes"

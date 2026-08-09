@@ -1,0 +1,44 @@
+name: Daily 5-Phase Scanner (Telegram Alerts)
+
+on:
+  schedule:
+    # Every 15 min during NSE market hours IST 9:30-15:30 = 04:00-10:00 UTC Mon-Fri
+    - cron: '0,15,30,45 4-9 * * 1-5'
+    - cron: '0,15,30,45 10 * * 1-5'  # 10:00-10:45 UTC covers till 15:30 IST + buffer
+    # Daily EOD watchlist at 15:45 IST = 10:15 UTC
+    - cron: '15 10 * * 1-5'
+  workflow_dispatch:  # allow manual trigger
+
+jobs:
+  scan:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout repo
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+
+      - name: Install dependencies
+        run: |
+          pip install --upgrade pip
+          pip install -r requirements.txt
+
+      - name: Run daily scanner
+        env:
+          TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
+          TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
+        run: |
+          python daily_scanner.py
+
+      - name: Upload daily artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: daily-scan-${{ github.run_id }}
+          path: |
+            daily_watchlist_*.csv
+            breakouts_today_*.csv
+            reversals_today_*.csv
+          if-no-files-found: ignore
