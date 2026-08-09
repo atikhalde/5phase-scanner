@@ -137,13 +137,11 @@ def fetch_dhan_history(symbol, from_date, to_date):
 
         if df is None or df.empty:
             return None
-        # Normalize columns
         rename_map = {'open': 'Open', 'high': 'High', 'low': 'Low', 'close': 'Close', 'volume': 'Volume', 'startTime': 'Date', 'timestamp': 'Date', 'date': 'Date'}
         df = df.rename(columns={k: v for k, v in rename_map.items() if k in df.columns})
         if 'Date' not in df.columns:
             return None
         df['Date'] = pd.to_datetime(df['Date'])
-        # Ensure required cols
         for col in ['Open','High','Low','Close','Volume']:
             if col not in df.columns:
                 return None
@@ -254,7 +252,6 @@ def run_daily_scan():
                 tr['ticker'] = f"{sym}.NS"
                 reversal_today_list.append(tr)
 
-            # Watchlist 30 days
             all_trades = result['all_trades']
             today = df['Date'].max().date() if not df.empty else datetime.now().date()
             for tr in all_trades:
@@ -277,14 +274,13 @@ def run_daily_scan():
             print(f"{sym} error {e}")
             continue
 
-    # Deduplicate watchlist
     dedup = {}
     for w in watchlist_all:
         key = (w['ticker'], str(w['breakout_date']))
         dedup[key] = w
     watchlist_all = list(dedup.values())
 
-    # Fallback to cached file if both APIs failed for all (GitHub Actions Yahoo blocked)
+    # Fallback to cached file if both APIs failed for all tickers
     if not watchlist_all and not breakout_today_list and not reversal_today_list:
         print("Both APIs failed for all tickers or no recent breakouts - using cached sample_1291_trades.csv as fallback for watchlist")
         try:
@@ -293,11 +289,11 @@ def run_daily_scan():
                 cdf = pd.read_csv(cached_path)
                 cdf['breakout_date'] = pd.to_datetime(cdf['breakout_date'])
                 cdf['reversal_date'] = pd.to_datetime(cdf['reversal_date'])
-                # Filter last 30 days from today
-                today = datetime.now().date()
-                # For fallback, use breakout_date within last 30 days
-                recent = cdf[(today - cdf['breakout_date'].dt.date).dt.days <= 30]
-                # Convert to watchlist format
+                today = pd.to_datetime(datetime.now().date())
+                # Filter breakout in last 30 days
+                recent = cdf[(today - cdf['breakout_date']).dt.days <= 30]
+                recent = recent[(today - recent['breakout_date']).dt.days > 0]
+                print(f"Fallback: found {len(recent)} recent (30d) trades from cache")
                 for _, row in recent.iterrows():
                     watchlist_all.append({
                         'ticker': row['ticker'],
@@ -306,11 +302,16 @@ def run_daily_scan():
                         'shake_low': row['shake_low'],
                         'drop_pct': row['drop_pct'],
                         'anchor_high': row['anchor_high'],
+                        'entry': row['entry'],
+                        'reversal_date': row['reversal_date'],
                     })
                 tickers_with_trades = cdf['ticker'].nunique()
-                print(f"Fallback loaded {len(watchlist_all)} recent from cache")
+            else:
+                print(f"Fallback file {cached_path} not found")
         except Exception as e:
             print(f"Fallback failed: {e}")
+            import traceback
+            traceback.print_exc()
 
     today_str = datetime.now().strftime('%Y-%m-%d')
     header = f"📊 *5-Phase Scanner Daily Report* {today_str} (Nifty500, 1291-trade logic)\nUniverse: {len(symbols)} | With setup: {tickers_with_trades}\nWatchlist window: last 30 days (changed from 7d as per request) | Dual API: Dhan primary, yfinance fallback\n"
