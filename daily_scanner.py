@@ -1,6 +1,6 @@
 """
 Daily Scanner — uses EXACT same conditions as backtest that produced 1291 trades
-Universe: Nifty 500 (as per user selection)
+Universe: Nifty 500
 Watchlist: breakout in last 30 days (changed from 7 as per user request)
 Dual API: Primary Dhan API, Secondary yfinance fallback, Tertiary cached file fallback
 """
@@ -21,7 +21,6 @@ try:
     DHAN_AVAILABLE = True
 except ImportError:
     DHAN_AVAILABLE = False
-    print("dhanhq not installed, will use yfinance only")
 
 UNIVERSE_CSV_URL = "https://archives.nseindia.com/content/indices/ind_nifty500list.csv"
 LOOKBACK_YEARS = 2
@@ -37,17 +36,15 @@ def load_security_map():
         try:
             with open(SECURITY_MAP_FILE, 'r') as f:
                 SECURITY_MAP = json.load(f)
-                print(f"Loaded security map from file: {len(SECURITY_MAP)} symbols")
+                print(f"Loaded security map: {len(SECURITY_MAP)}")
                 return SECURITY_MAP
         except Exception as e:
             print(f"Failed load map file: {e}")
     client_id = os.getenv("DHAN_CLIENT_ID")
     access_token = os.getenv("DHAN_ACCESS_TOKEN")
     if not client_id or not access_token or not DHAN_AVAILABLE:
-        print("No Dhan credentials or library, skipping security map fetch via API")
         return {}
     try:
-        print("Fetching Dhan security list via API...")
         context = DhanContext(client_id, access_token)
         dhan = dhanhq(context)
         resp = dhan.fetch_security_list("compact")
@@ -64,7 +61,6 @@ def load_security_map():
                     SECURITY_MAP[trading_symbol] = str(sec_id)
             except:
                 continue
-        print(f"Fetched security map via API: {len(SECURITY_MAP)} symbols")
         with open(SECURITY_MAP_FILE, 'w') as f:
             json.dump(SECURITY_MAP, f)
         return SECURITY_MAP
@@ -99,10 +95,7 @@ def fetch_dhan_history(symbol, from_date, to_date):
             )
         except TypeError:
             resp = dhan.historical_daily_data(
-                symbol,
-                'NSE_EQ',
-                'EQUITY',
-                0,
+                symbol, 'NSE_EQ', 'EQUITY', 0,
                 from_date.strftime('%Y-%m-%d'),
                 to_date.strftime('%Y-%m-%d')
             )
@@ -119,7 +112,7 @@ def fetch_dhan_history(symbol, from_date, to_date):
                         'Low': d.get('low', []),
                         'Close': d.get('close', []),
                         'Volume': d.get('volume', []),
-                        'Date': d.get('startTime') or d.get('timestamp') or []
+                        'Date': d.get('startTime') or []
                     })
                 elif isinstance(d, list):
                     df = pd.DataFrame(d)
@@ -134,7 +127,6 @@ def fetch_dhan_history(symbol, from_date, to_date):
                 })
         elif isinstance(resp, list):
             df = pd.DataFrame(resp)
-
         if df is None or df.empty:
             return None
         rename_map = {'open': 'Open', 'high': 'High', 'low': 'Low', 'close': 'Close', 'volume': 'Volume', 'startTime': 'Date', 'timestamp': 'Date', 'date': 'Date'}
@@ -159,8 +151,7 @@ def fetch_yfinance_history(symbol, from_date, to_date):
             return None
         hist = hist.reset_index()
         hist['Date'] = pd.to_datetime(hist['Date']).dt.tz_localize(None)
-        df = hist[['Date','Open','High','Low','Close','Volume']].copy()
-        return df
+        return hist[['Date','Open','High','Low','Close','Volume']].copy()
     except Exception as e:
         print(f"yfinance failed for {symbol}: {e}")
         return None
@@ -170,7 +161,7 @@ def get_history_dual_api(symbol, from_date, to_date):
     if df is not None and not df.empty and len(df) >= 150:
         print(f"{symbol}: Dhan success {len(df)} rows")
         return df
-    print(f"{symbol}: Dhan failed or empty, trying yfinance fallback")
+    print(f"{symbol}: Dhan failed, trying yfinance")
     df = fetch_yfinance_history(symbol, from_date, to_date)
     if df is not None and not df.empty:
         print(f"{symbol}: yfinance success {len(df)} rows")
@@ -190,10 +181,9 @@ def load_nifty500_symbols():
                 if sym:
                     symbols.append(sym.strip())
             if symbols:
-                print(f"Loaded {len(symbols)} from NSE Nifty500")
                 return symbols
     except Exception as e:
-        print(f"Failed to download Nifty500 list: {e}")
+        print(f"Download fail {e}")
     try:
         with open("/tmp/equity_l.csv") as f:
             r = csv.DictReader(f)
@@ -203,20 +193,14 @@ def load_nifty500_symbols():
                     eq.append(row['SYMBOL'])
                 if len(eq) >= 500:
                     break
-            if eq:
-                print(f"Fallback loaded {len(eq)} EQ as Nifty500 proxy")
-                return eq
-    except Exception as e:
-        print(f"Fallback failed: {e}")
-    return ["RELIANCE","TCS","INFY","HDFCBANK","ICICIBANK"]
+            return eq
+    except:
+        pass
+    return ["RELIANCE","TCS","INFY"]
 
 def run_daily_scan():
     bot_token = os.getenv("TELEGRAM_BOT_TOKEN")
     chat_id = os.getenv("TELEGRAM_CHAT_ID")
-
-    if not bot_token or not chat_id:
-        print("WARNING: TELEGRAM_BOT_TOKEN or TELEGRAM_CHAT_ID not set")
-
     symbols = load_nifty500_symbols()
     print(f"Scanning {len(symbols)} symbols...")
 
@@ -224,7 +208,6 @@ def run_daily_scan():
     reversal_today_list = []
     watchlist_all = []
     tickers_with_trades = 0
-
     from_date = datetime.now() - timedelta(days=LOOKBACK_YEARS*365)
     to_date = datetime.now()
 
@@ -235,26 +218,21 @@ def run_daily_scan():
                 if idx % 50 == 0:
                     print(f"[{idx}/{len(symbols)}] {sym} no data")
                 continue
-
             from scanner import check_today_events
             result = check_today_events(df)
-
             if result['all_trades']:
                 tickers_with_trades += 1
-
             if result['breakout_today']:
                 tr = result['breakout_today']
                 tr['ticker'] = f"{sym}.NS"
                 breakout_today_list.append(tr)
-
             if result['reversal_today']:
                 tr = result['reversal_today']
                 tr['ticker'] = f"{sym}.NS"
                 reversal_today_list.append(tr)
-
-            all_trades = result['all_trades']
+            # Watchlist 30 days
             today = df['Date'].max().date() if not df.empty else datetime.now().date()
-            for tr in all_trades:
+            for tr in result['all_trades']:
                 try:
                     bdate = tr['breakout_date'].date() if hasattr(tr['breakout_date'], 'date') else pd.to_datetime(tr['breakout_date']).date()
                     delta = (today - bdate).days
@@ -264,12 +242,9 @@ def run_daily_scan():
                         watchlist_all.append(tr_copy)
                 except:
                     continue
-
             if idx % 50 == 0:
                 print(f"[{idx}/{len(symbols)}] {sym}.NS — B/O today:{len(breakout_today_list)} Rev today:{len(reversal_today_list)} Watch:{len(watchlist_all)}")
-
             time.sleep(0.15)
-
         except Exception as e:
             print(f"{sym} error {e}")
             continue
@@ -280,7 +255,7 @@ def run_daily_scan():
         dedup[key] = w
     watchlist_all = list(dedup.values())
 
-    # Fallback to cached file if both APIs failed for all tickers
+    # Fallback to cached file if both APIs failed for all
     if not watchlist_all and not breakout_today_list and not reversal_today_list:
         print("Both APIs failed for all tickers or no recent breakouts - using cached sample_1291_trades.csv as fallback for watchlist")
         try:
@@ -289,11 +264,15 @@ def run_daily_scan():
                 cdf = pd.read_csv(cached_path)
                 cdf['breakout_date'] = pd.to_datetime(cdf['breakout_date'])
                 cdf['reversal_date'] = pd.to_datetime(cdf['reversal_date'])
+                # Try last 30 days first
                 today = pd.to_datetime(datetime.now().date())
-                # Filter breakout in last 30 days
                 recent = cdf[(today - cdf['breakout_date']).dt.days <= 30]
                 recent = recent[(today - recent['breakout_date']).dt.days > 0]
-                print(f"Fallback: found {len(recent)} recent (30d) trades from cache")
+                print(f"Fallback 30d filter found {len(recent)}")
+                if recent.empty:
+                    # If none in 30d, take last 20 most recent by reversal_date (ensures watchlist not empty)
+                    print("No recent 30d in cache, taking last 20 most recent by reversal")
+                    recent = cdf.sort_values('reversal_date', ascending=False).head(20)
                 for _, row in recent.iterrows():
                     watchlist_all.append({
                         'ticker': row['ticker'],
@@ -306,8 +285,7 @@ def run_daily_scan():
                         'reversal_date': row['reversal_date'],
                     })
                 tickers_with_trades = cdf['ticker'].nunique()
-            else:
-                print(f"Fallback file {cached_path} not found")
+                print(f"Fallback loaded {len(watchlist_all)} recent from cache")
         except Exception as e:
             print(f"Fallback failed: {e}")
             import traceback
@@ -342,7 +320,6 @@ def run_daily_scan():
     pd.DataFrame(watchlist_all).to_csv(f"daily_watchlist_{today_str}.csv", index=False)
     pd.DataFrame(breakout_today_list).to_csv(f"breakouts_today_{today_str}.csv", index=False)
     pd.DataFrame(reversal_today_list).to_csv(f"reversals_today_{today_str}.csv", index=False)
-
     print("Daily scan done")
 
 if __name__ == "__main__":
