@@ -1,7 +1,7 @@
 """
 Daily Scanner — uses EXACT same conditions as backtest that produced 1291 trades
 Universe: Nifty 500
-Watchlist: breakout in last 30 days, if none then 60 days (as per user request), only waiting reversal (reversal_date > today)
+Watchlist: breakout in last 30 days waiting reversal (reversal > today), if none then 60 days, first verify
 Dual API: Primary Dhan API, Secondary yfinance fallback, Tertiary cached file fallback
 """
 
@@ -231,7 +231,6 @@ def run_daily_scan():
                 tr = result['reversal_today']
                 tr['ticker'] = f"{sym}.NS"
                 reversal_today_list.append(tr)
-            # Use new 30/60 logic from scanner
             for w in result['watchlist']:
                 w['ticker'] = f"{sym}.NS"
                 watchlist_all.append(w)
@@ -250,7 +249,6 @@ def run_daily_scan():
             print(f"{sym} error {e}")
             continue
 
-    # Deduplicate watchlist by ticker+breakout
     def dedup(lst):
         d={}
         for w in lst:
@@ -262,17 +260,17 @@ def run_daily_scan():
     watchlist_30 = dedup(watchlist_30)
     watchlist_60 = dedup(watchlist_60)
 
-    # Final watchlist logic: first verify 30 days, if none then 60 days
+    # Final watchlist logic: first verify 30 days waiting, then 60 days
     final_watchlist = watchlist_30
     window_used = 30
     if not final_watchlist:
-        print("No breakout in last 30 days waiting reversal - expanding to 60 days as per request")
+        print("No breakout in last 30 days waiting reversal - verifying and expanding to 60 days as per request")
         final_watchlist = watchlist_60
         window_used = 60
 
     # Fallback to cached file if both APIs failed for all
     if not final_watchlist and not breakout_today_list and not reversal_today_list:
-        print("Both APIs failed for all tickers - using cached sample_1291_trades.csv as fallback")
+        print("Both APIs failed for all tickers - using cached file as fallback, first verify 30d waiting then 60d")
         try:
             cached_path = "sample_1291_trades.csv"
             if os.path.exists(cached_path):
@@ -280,44 +278,36 @@ def run_daily_scan():
                 cdf['breakout_date'] = pd.to_datetime(cdf['breakout_date'])
                 cdf['reversal_date'] = pd.to_datetime(cdf['reversal_date'])
                 today = pd.to_datetime(datetime.now().date())
-                # First try 30 days waiting (reversal > today)
-                recent_30 = cdf[(today - cdf['breakout_date']).dt.days <= 30]
+                # Only waiting reversals (reversal > today)
+                waiting = cdf[cdf['reversal_date'] > today]
+                print(f"Cache total {len(cdf)} waiting (reversal>{today.date()}) {len(waiting)}")
+                recent_30 = waiting[(today - waiting['breakout_date']).dt.days <= 30]
                 recent_30 = recent_30[(today - recent_30['breakout_date']).dt.days > 0]
-                # Only waiting reversal
-                waiting_30 = recent_30[recent_30['reversal_date'] > today]
-                print(f"Fallback 30d waiting: {len(waiting_30)}")
-                if not waiting_30.empty:
-                    final_watchlist = waiting_30.to_dict('records')
+                print(f"Fallback 30d waiting: {len(recent_30)}")
+                if not recent_30.empty:
+                    final_watchlist = recent_30.to_dict('records')
                     window_used = 30
                 else:
-                    # Try 60 days waiting
-                    recent_60 = cdf[(today - cdf['breakout_date']).dt.days <= 60]
+                    recent_60 = waiting[(today - waiting['breakout_date']).dt.days <= 60]
                     recent_60 = recent_60[(today - recent_60['breakout_date']).dt.days > 0]
-                    waiting_60 = recent_60[recent_60['reversal_date'] > today]
-                    print(f"Fallback 60d waiting: {len(waiting_60)}")
-                    if not waiting_60.empty:
-                        final_watchlist = waiting_60.to_dict('records')
+                    print(f"Fallback 60d waiting: {len(recent_60)}")
+                    if not recent_60.empty:
+                        final_watchlist = recent_60.to_dict('records')
                         window_used = 60
                     else:
-                        # If still none, show last 20 most recent waiting? Or show past reversals that already fired but within 30d?
-                        # For now show most recent breakouts regardless of reversal status, to avoid empty watchlist
-                        print("No waiting in 30/60d in cache, showing most recent 20 overall")
-                        recent_any = cdf.sort_values('breakout_date', ascending=False).head(20)
-                        final_watchlist = recent_any.to_dict('records')
-                        window_used = 0  # special flag
+                        print("No waiting in 30/60d in cache - all recent breakouts already reversed, watchlist empty is correct")
+                        final_watchlist = []
+                        window_used = 0
                 tickers_with_trades = cdf['ticker'].nunique()
-            else:
-                print(f"Fallback file {cached_path} not found")
         except Exception as e:
             print(f"Fallback failed: {e}")
             import traceback
             traceback.print_exc()
 
     today_str = datetime.now().strftime('%Y-%m-%d')
-    header = f"📊 *5-Phase Scanner Daily Report* {today_str} (Nifty500, 1291-trade logic)\nUniverse: {len(symbols)} | With setup: {tickers_with_trades}\nWatchlist window: last {window_used if window_used!=0 else 'recent'} days (30d first, then 60d as per request) | Dual API: Dhan primary, yfinance fallback\n"
+    header = f"📊 *5-Phase Scanner Daily Report* {today_str} (Nifty500, 1291-trade logic)\nUniverse: {len(symbols)} | With setup: {tickers_with_trades}\nWatchlist window: last {window_used if window_used!=0 else '30/60'} days (30d first verified, then 60d) | Dual API: Dhan primary, yfinance fallback\n"
 
     from telegram_helper import format_watchlist, send_telegram_message, format_breakout_alert, format_reversal_alert
-    # For telegram message, we need to pass window info
     watchlist_msg = format_watchlist(final_watchlist, tickers_with_trades)
     full_watchlist_msg = header + "\n" + watchlist_msg
 
