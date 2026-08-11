@@ -90,13 +90,25 @@ def _epoch_to_dates(values):
     s = pd.Series(list(values))
     if len(s) == 0:
         return pd.Series([], dtype='datetime64[ns]')
-    if s.dtype.kind in 'iu':
+    # coerce numeric strings ("1754900000") to numeric
+    if s.dtype.kind == 'O':
+        s2 = pd.to_numeric(s, errors='coerce')
+        if not s2.isna().all():
+            s = s2
+    if s.dtype.kind in 'iuf':                # int OR float epochs
         mx = float(s.max())
         if mx < 10 ** 11:                    # epoch seconds (Dhan v2)
             return pd.to_datetime(s, unit='s', utc=True).dt.tz_convert('Asia/Kolkata').dt.tz_localize(None)
         if mx < 10 ** 14:                    # epoch milliseconds
             return pd.to_datetime(s, unit='ms', utc=True).dt.tz_convert('Asia/Kolkata').dt.tz_localize(None)
-    return pd.to_datetime(s)
+    dts = pd.to_datetime(s)
+    # sanity: if everything landed in 1970-1999, the values were epochs parsed
+    # as nanoseconds -> redo with seconds
+    if len(dts) and dts.max().year < 2000:
+        num = pd.to_numeric(s, errors='coerce')
+        if not num.isna().all():
+            dts = pd.to_datetime(num, unit='s', utc=True).dt.tz_convert('Asia/Kolkata').dt.tz_localize(None)
+    return dts
 
 # ---------------------------------------------------------------------------
 # Dhan (primary)
@@ -174,6 +186,15 @@ def fetch_dhan_history(symbol, from_date, to_date):
         # (docs also show the data dict at top level without a wrapper)
         if isinstance(resp, dict) and resp.get('status') == 'failure':
             return None
+        # one-time debug of the actual response shape (first symbol only)
+        if not getattr(fetch_dhan_history, '_debug_done', False):
+            fetch_dhan_history._debug_done = True
+            try:
+                d0 = resp.get('data', resp) if isinstance(resp, dict) else resp
+                print(f"DHAN DEBUG keys={list(d0.keys()) if isinstance(d0, dict) else type(d0)} "
+                      f"ts_sample={str(d0.get('timestamp') or d0.get('startTime') or '')[:120]}")
+            except Exception:
+                pass
         df = None
         if isinstance(resp, dict):
             d = resp.get('data', resp)
