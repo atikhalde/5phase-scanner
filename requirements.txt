@@ -1,4 +1,7 @@
-yfinance==0.2.44
+# yfinance 0.2.44 is BROKEN against Yahoo's current API (cookie/crumb auth, 2025+):
+# every ticker fails with "Expecting value: line 1 column 1 (char 0)".
+# Minimum 0.2.54+ supports the new Yahoo auth. Tested working: 1.5.2
+yfinance>=0.2.54
 pandas==2.2.3
 numpy==1.26.4
 requests==2.32.3

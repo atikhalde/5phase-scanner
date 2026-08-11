@@ -1,0 +1,6 @@
+__pycache__/
+*.pyc
+daily_watchlist_*.csv
+breakouts_today_*.csv
+reversals_today_*.csv
+recent_reversals_fired_*.csv

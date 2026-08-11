@@ -9,9 +9,16 @@ on:
     - cron: '15 10 * * 1-5'
   workflow_dispatch:  # allow manual trigger
 
+# Only one scan at a time: a 500-symbol scan can take >15 min, and overlapping
+# runs would send duplicate Telegram alerts. Newest trigger wins.
+concurrency:
+  group: daily-scan
+  cancel-in-progress: true
+
 jobs:
   scan:
     runs-on: ubuntu-latest
+    timeout-minutes: 300
     steps:
       - name: Checkout repo
         uses: actions/checkout@v4
@@ -30,6 +37,11 @@ jobs:
         env:
           TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
           TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
+          # Dhan is the PRIMARY data source. These secrets are defined in the
+          # repo but were NOT passed to the job before, so Dhan always failed
+          # in live runs and the scanner fell back to stale cached data.
+          DHAN_CLIENT_ID: ${{ secrets.DHAN_CLIENT_ID }}
+          DHAN_ACCESS_TOKEN: ${{ secrets.DHAN_ACCESS_TOKEN }}
         run: |
           python daily_scanner.py
 
