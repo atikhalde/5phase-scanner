@@ -83,6 +83,21 @@ def last_data_date(df):
         return None
     return pd.to_datetime(df.iloc[-1]['Date']).date()
 
+
+def _epoch_to_dates(values):
+    """Convert Dhan epoch timestamps (seconds/ms) to IST-naive datetimes.
+    pd.to_datetime assumes nanoseconds, so unit must be detected by magnitude."""
+    s = pd.Series(list(values))
+    if len(s) == 0:
+        return pd.Series([], dtype='datetime64[ns]')
+    if s.dtype.kind in 'iu':
+        mx = float(s.max())
+        if mx < 10 ** 11:                    # epoch seconds (Dhan v2)
+            return pd.to_datetime(s, unit='s', utc=True).dt.tz_convert('Asia/Kolkata').dt.tz_localize(None)
+        if mx < 10 ** 14:                    # epoch milliseconds
+            return pd.to_datetime(s, unit='ms', utc=True).dt.tz_convert('Asia/Kolkata').dt.tz_localize(None)
+    return pd.to_datetime(s)
+
 # ---------------------------------------------------------------------------
 # Dhan (primary)
 # ---------------------------------------------------------------------------
@@ -156,6 +171,7 @@ def fetch_dhan_history(symbol, from_date, to_date):
         if not resp:
             return None
         # Dhan returns {"status": "success", "data": {"open": [], "high": [], ...}}
+        # (docs also show the data dict at top level without a wrapper)
         if isinstance(resp, dict) and resp.get('status') == 'failure':
             return None
         df = None
@@ -165,7 +181,7 @@ def fetch_dhan_history(symbol, from_date, to_date):
                 df = pd.DataFrame({'Open': d.get('open', []), 'High': d.get('high', []),
                                    'Low': d.get('low', []), 'Close': d.get('close', []),
                                    'Volume': d.get('volume', []),
-                                   'Date': d.get('startTime') or d.get('timestamp') or d.get('date') or []})
+                                   'Date': d.get('timestamp') or d.get('startTime') or d.get('date') or []})
             elif isinstance(d, list):
                 df = pd.DataFrame(d)
         elif isinstance(resp, list):
@@ -173,11 +189,13 @@ def fetch_dhan_history(symbol, from_date, to_date):
         if df is None or df.empty:
             return None
         rename_map = {'open': 'Open', 'high': 'High', 'low': 'Low', 'close': 'Close',
-                      'volume': 'Volume', 'startTime': 'Date', 'timestamp': 'Date', 'date': 'Date'}
+                      'volume': 'Volume', 'timestamp': 'Date', 'startTime': 'Date', 'date': 'Date'}
         df = df.rename(columns={k: v for k, v in rename_map.items() if k in df.columns})
         if 'Date' not in df.columns:
             return None
-        df['Date'] = pd.to_datetime(df['Date'])
+        # Dhan timestamps are EPOCH SECONDS (e.g. 1326220200). pd.to_datetime
+        # assumes nanoseconds -> would give 1970 dates; detect unit by magnitude.
+        df['Date'] = _epoch_to_dates(df['Date'])
         for col in ['Open', 'High', 'Low', 'Close', 'Volume']:
             if col not in df.columns:
                 return None
