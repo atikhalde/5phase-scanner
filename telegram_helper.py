@@ -19,12 +19,21 @@ def send_telegram_message(bot_token, chat_id, message, parse_mode="Markdown"):
 def format_breakout_alert(trade, ticker):
     anchor_date = trade['anchor_date'].strftime('%Y-%m-%d') if hasattr(trade['anchor_date'], 'strftime') else str(trade['anchor_date'])
     breakout_date = trade['breakout_date'].strftime('%Y-%m-%d') if hasattr(trade['breakout_date'], 'strftime') else str(trade['breakout_date'])
+    rally_high = trade.get('rally_high')
+    if rally_high is not None:
+        rhd = trade.get('rally_high_date')
+        rhd_str = rhd.strftime('%Y-%m-%d') if hasattr(rhd, 'strftime') else str(rhd)
+        rally_line = f"Rally High: {rally_high} on {rhd_str}\n"
+        tail = "Drop will be tracked next 15d"
+    else:
+        rally_line = "Rally High: pending (needs 1-7 day continuation >1%)\n"
+        tail = "Awaiting rally confirmation (Phase 4a)"
     return (
         f"🚀 *BREAKOUT ALERT* `{ticker}`\n"
         f"Anchor: {trade['anchor_high']} on {anchor_date} ({trade['days_since']}d ago)\n"
         f"Breakout: {trade['breakout_close']} on {breakout_date} Vol {trade['vol_break']}x\n"
-        f"Rally High: {trade['rally_high']} on {trade['rally_high_date'].strftime('%Y-%m-%d') if hasattr(trade['rally_high_date'], 'strftime') else trade['rally_high_date']}\n"
-        f"Dry90: {trade['dry90']} | Drop will be tracked next 15d"
+        f"{rally_line}"
+        f"Dry90: {trade['dry90']} | {tail}"
     )
 
 def format_reversal_alert(trade, ticker):
@@ -43,15 +52,29 @@ def format_reversal_alert(trade, ticker):
 def format_watchlist(watchlist, tickers_with_trades):
     if not watchlist:
         return "📋 *Daily Watchlist*: No recent breakouts in last 30 days waiting reversal (verified, then checked 60d - also none)"
-    lines = [f"📋 *Daily Watchlist* — {len(watchlist)} stocks in breakout+shakeout phase waiting reversal (last 30d verified, then 60d):\n"]
+    pending = [t for t in watchlist if t.get('reversal_date') is None or (isinstance(t.get('reversal_date'), float) and t.get('reversal_date') != t.get('reversal_date'))]
+    fired = [t for t in watchlist if t not in pending]
+    lines = [f"📋 *Daily Watchlist* — {len(watchlist)} stocks waiting reversal (last 30d verified, then 60d):\n"]
     for trade in watchlist[:20]:
         ticker = trade.get('ticker', 'UNKNOWN')
         bd = trade['breakout_date'].strftime('%Y-%m-%d') if hasattr(trade['breakout_date'], 'strftime') else str(trade['breakout_date'])
-        rd = trade['reversal_date'].strftime('%Y-%m-%d') if hasattr(trade['reversal_date'], 'strftime') else str(trade['reversal_date'])
-        lines.append(f"• `{ticker}` B/O {bd} Rally {trade['rally_high']} Shake {trade['shake_low']} ({trade['drop_pct']}%) → Waiting reversal {rd}")
+        rally = trade.get('rally_high')
+        shake = trade.get('shake_low')
+        drop = trade.get('drop_pct')
+        is_pending = trade.get('reversal_date') is None or (
+            isinstance(trade.get('reversal_date'), float)
+            and trade.get('reversal_date') != trade.get('reversal_date'))
+        if is_pending:
+            # In-progress breakout: Phase 4a confirmed, shakeout/reversal not yet.
+            lines.append(
+                f"• `{ticker}` B/O {bd} Rally {rally} → *awaiting shakeout & reversal*")
+        else:
+            rd = trade['reversal_date'].strftime('%Y-%m-%d') if hasattr(trade['reversal_date'], 'strftime') else str(trade['reversal_date'])
+            lines.append(
+                f"• `{ticker}` B/O {bd} Rally {rally} Shake {shake} ({drop}%) → Waiting reversal {rd}")
     if len(watchlist) > 20:
         lines.append(f"... and {len(watchlist)-20} more")
-    lines.append(f"\nTotal with setup: {tickers_with_trades} tickers | Logic: 1291 trades (ABDL fix)")
+    lines.append(f"\nTotal with setup: {tickers_with_trades} tickers | Pending: {len(pending)} | Logic: 1291 trades (ABDL fix)")
     return "\n".join(lines)
 
 def format_recent_reversals_fired(recent_list):
