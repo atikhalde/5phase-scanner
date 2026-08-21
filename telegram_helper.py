@@ -53,7 +53,6 @@ def format_watchlist(watchlist, tickers_with_trades):
     if not watchlist:
         return "📋 *Daily Watchlist*: No recent breakouts in last 30 days waiting reversal (verified, then checked 60d - also none)"
     pending = [t for t in watchlist if t.get('reversal_date') is None or (isinstance(t.get('reversal_date'), float) and t.get('reversal_date') != t.get('reversal_date'))]
-    fired = [t for t in watchlist if t not in pending]
     lines = [f"📋 *Daily Watchlist* — {len(watchlist)} stocks waiting reversal (last 30d verified, then 60d):\n"]
     for trade in watchlist[:20]:
         ticker = trade.get('ticker', 'UNKNOWN')
@@ -65,16 +64,27 @@ def format_watchlist(watchlist, tickers_with_trades):
             isinstance(trade.get('reversal_date'), float)
             and trade.get('reversal_date') != trade.get('reversal_date'))
         if is_pending:
-            # In-progress breakout: Phase 4a confirmed, shakeout/reversal not yet.
-            lines.append(
-                f"• `{ticker}` B/O {bd} Rally {rally} → *awaiting shakeout & reversal*")
+            status = trade.get('status')
+            if status == 'awaiting_reversal' or shake is not None:
+                # Valid 4-25% low-volume shakeout already observed; waiting
+                # for the bullish reversal bar (reversal window still open).
+                lines.append(
+                    f"• `{ticker}` B/O {bd} Rally {rally} Shake {shake} ({drop}%) → *awaiting reversal*")
+            else:
+                # Phase 4a confirmed; shakeout window still open, no valid
+                # shakeout yet.  Expired/failed breakouts are excluded
+                # upstream (ABDL-type filter).
+                lines.append(
+                    f"• `{ticker}` B/O {bd} Rally {rally} → *awaiting shakeout*")
         else:
             rd = trade['reversal_date'].strftime('%Y-%m-%d') if hasattr(trade['reversal_date'], 'strftime') else str(trade['reversal_date'])
             lines.append(
                 f"• `{ticker}` B/O {bd} Rally {rally} Shake {shake} ({drop}%) → Waiting reversal {rd}")
     if len(watchlist) > 20:
         lines.append(f"... and {len(watchlist)-20} more")
-    lines.append(f"\nTotal with setup: {tickers_with_trades} tickers | Pending: {len(pending)} | Logic: 1291 trades (ABDL fix)")
+    # tickers_with_trades is a HISTORICAL count (any setup found in the 2Y
+    # scan), not the number of live setups -- label it accordingly.
+    lines.append(f"\nTickers with any 2Y setup: {tickers_with_trades} | Pending: {len(pending)} | Logic: 1291 trades (ABDL fix)")
     return "\n".join(lines)
 
 def format_recent_reversals_fired(recent_list):

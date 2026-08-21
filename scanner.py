@@ -22,6 +22,23 @@ Phase 4b shakeout / Phase 5 reversal. Those are the genuine "waiting for reversa
 candidates and are used for the 30d/60d watchlist windows. breakout_today is also
 fixed to fire on the actual breakout bar (Phase 3), before the 1-7 day rally
 confirmation window has elapsed.
+
+Watchlist logic (TIGHTENED 2026-08-20, second pass -- ABDL-type filter):
+detect_pending_breakouts() previously returned EVERY 4a-confirmed breakout in the
+lookback window indefinitely -- including stale breakouts whose shakeout/reversal
+windows had already closed without progress (failed "ABDL-type" breakouts that
+sat in the report forever). Each pending breakout now carries a lifecycle
+`status` (see detect_pending_breakouts):
+
+  awaiting_shakeout -- 4a confirmed, 15-bar shakeout window still open, no
+    valid 4-25% low-volume pullback yet.
+  awaiting_reversal -- valid shakeout observed (shake_low/drop_pct populated),
+    reversal window still open, no bullish reversal bar yet.
+
+Breakouts whose shakeout or reversal windows have CLOSED without progress are
+now EXCLUDED from the report (expired/failed). The Telegram footer
+"Total with setup: N tickers" was renamed to "Tickers with any 2Y setup" so
+it's clear that count is historical (any setup in the 2Y data), not live.
 """
 
 import pandas as pd
@@ -175,21 +192,93 @@ def scan_5phase(df, dry_thresh=8, vol_break=1.5, vol_shake_max=1.0, vol_rev_min=
 
 
 # ---------------------------------------------------------------------------
-# Pending (in-progress) breakout detector.
+# Pending (in-progress) breakout detector with lifecycle statuses.
 #
 # Scans the last `lookback_days` calendar days of the (already-prepared)
-# DataFrame and returns every Phase 1->4a breakout that has NOT yet completed
-# the full pattern with a Phase 5 reversal -- these are genuine "waiting for
-# reversal" candidates for the daily watchlist.
+# DataFrame and returns Phase 1->4a breakouts that are still ALIVE in their
+# Phase 4b / Phase 5 windows -- these are genuine "waiting" candidates for
+# the daily watchlist.  Each returned record carries a `status`:
 #
-# A breakout is excluded if scan_5phase() already emitted a completed trade
-# with the same breakout date (reversal already fired).
+#   awaiting_shakeout -- 4a confirmed, 15-bar shakeout window still open,
+#     no valid 4-25% low-volume pullback observed yet (shake_* fields None).
+#   awaiting_reversal -- valid shakeout OBSERVED (shake_low/drop_pct
+#     populated, same computation scan_5phase would use), no bullish
+#     reversal bar yet, and the 15-bar reversal window is still open.
 #
-# Returned records carry the same fields as completed trades up through
-# rally_high, with shake/reversal fields set to None so downstream
-# formatters can distinguish "waiting" from "fired".
+# ABDL-type filter (TIGHTENED 2026-08-20): a breakout is EXCLUDED once its
+# windows have expired -- i.e. the 15-bar shakeout window has fully elapsed
+# without a valid shakeout, or the 15-bar reversal window has fully elapsed
+# without a bullish reversal.  Previously every 4a-confirmed breakout was
+# shown indefinitely, so failed breakouts lingered as stale "waiting"
+# entries.  A breakout is also excluded if scan_5phase() already emitted a
+# completed trade with the same breakout date, or if an observed reversal
+# bar is already present in its reversal window (i.e. it fired).
+#
+# Window sizes mirror scan_5phase exactly: shakeout = bars rally_idx+1 ..
+# rally_idx+15, reversal = bars low_idx+1 .. low_idx+15.  A window counts as
+# "closed" only once all 15 of its bars have been observed, so recent
+# breakouts are never cut off early.
 # ---------------------------------------------------------------------------
-def detect_pending_breakouts(df, lookback_days=60):
+def _find_shakeout(df, i, rally_idx, n, vol_shake_max=1.0, drop_min=4, drop_max=25):
+    """Phase 4b on OBSERVED bars only (same computation as scan_5phase).
+
+    Returns a dict with:
+      window_closed -- all 15 shakeout bars (rally_idx+1..rally_idx+15) seen
+      valid         -- a low-volume pullback with a 4-25% drop exists
+      when a low-volume pullback exists at all: shake_low, low_row, low_idx,
+      shake_high, drop
+    """
+    info = {'window_closed': n >= rally_idx + 16, 'valid': False}
+    shake_start = rally_idx + 1
+    shake_end = min(rally_idx + 16, n)
+    shake_window = df.iloc[shake_start:shake_end]
+    if len(shake_window) == 0:
+        return info
+    low_vol = shake_window[shake_window['VolRatio'] < vol_shake_max]
+    if low_vol.empty:
+        return info
+    shake_low = low_vol['Low'].min()
+    low_candidates = low_vol[low_vol['Low'] == shake_low]
+    low_row = low_candidates.iloc[0]
+    low_idx = low_row.name
+    shake_high = df.iloc[i:low_idx+1]['High'].max()
+    drop = (shake_high - shake_low) / shake_high * 100 if shake_high else 0
+    info.update({
+        'valid': drop_min <= drop <= drop_max,
+        'shake_low': shake_low,
+        'low_row': low_row,
+        'low_idx': low_idx,
+        'shake_high': shake_high,
+        'drop': drop,
+    })
+    return info
+
+
+def _find_reversal(df, low_row, low_idx, n, vol_rev_min=0.6):
+    """Phase 5 on OBSERVED bars only (same conditions as scan_5phase).
+
+    Returns (fired, window_closed): `fired` = a bullish reversal bar is
+    already present in the observed window; `window_closed` = all 15
+    reversal bars (low_idx+1..low_idx+15) have been observed.
+    """
+    rev_window = df.iloc[low_idx+1:min(low_idx+16, n)]
+    fired = False
+    for j, rev in rev_window.iterrows():
+        if pd.isna(rev['VolRatio']):
+            continue
+        if rev['Close'] <= rev['Open']:
+            continue
+        prev_high = df.iloc[j-1]['High'] if j > 0 else 0
+        if (rev['Close'] > prev_high and rev['Close'] > low_row['High']
+                and rev['VolRatio'] > vol_rev_min
+                and rev['VolRatio'] > low_row['VolRatio'] * 0.8):
+            fired = True
+            break
+    return fired, n >= low_idx + 16
+
+
+def detect_pending_breakouts(df, lookback_days=60, vol_shake_max=1.0,
+                             vol_rev_min=0.6, drop_min=4, drop_max=25):
     if len(df) < 250:
         return []
     df = prepare_df(df)
@@ -225,6 +314,48 @@ def detect_pending_breakouts(df, lookback_days=60):
         if bo is None:
             i += 1
             continue
+        rally_idx = bo['rally_idx']
+
+        # --- lifecycle classification (ABDL-type filter) ---
+        shake = _find_shakeout(df, i, rally_idx, n,
+                               vol_shake_max=vol_shake_max,
+                               drop_min=drop_min, drop_max=drop_max)
+        if shake['valid']:
+            # Valid 4-25% low-volume shakeout already observed.  Still
+            # pending only if no bullish reversal bar has fired AND the
+            # 15-bar reversal window has not fully elapsed.
+            fired, rev_closed = _find_reversal(df, shake['low_row'],
+                                               shake['low_idx'], n,
+                                               vol_rev_min=vol_rev_min)
+            if fired or rev_closed:
+                # Reversal already fired, or its window closed without one:
+                # expired/failed -> excluded.
+                i = rally_idx + 1
+                continue
+            status = 'awaiting_reversal'
+            shake_fields = {
+                'shake_low_date': shake['low_row']['Date'],
+                'shake_low': round(float(shake['shake_low']), 2),
+                'shake_low_vol': round(float(shake['low_row']['VolRatio']), 2),
+                'shake_high': round(float(shake['shake_high']), 2),
+                'drop_pct': round(float(shake['drop']), 2),
+            }
+        else:
+            # No valid shakeout yet.  Still pending only while the 15-bar
+            # shakeout window is open; once it has fully elapsed without a
+            # valid shakeout the breakout is expired/failed -> excluded.
+            if shake['window_closed']:
+                i = rally_idx + 1
+                continue
+            status = 'awaiting_shakeout'
+            shake_fields = {
+                'shake_low_date': None,
+                'shake_low': None,
+                'shake_low_vol': None,
+                'shake_high': None,
+                'drop_pct': None,
+            }
+
         pending.append({
             'anchor_date': bo['anchor_date'],
             'anchor_high': bo['anchor_high'],
@@ -235,22 +366,21 @@ def detect_pending_breakouts(df, lookback_days=60):
             'vol_break': bo['vol_break'],
             'rally_high_date': bo['rally_high_date'],
             'rally_high': bo['rally_high'],
-            # Phase 4b/5 not yet confirmed -- explicitly None
-            'shake_low_date': None,
-            'shake_low': None,
-            'shake_low_vol': None,
-            'shake_high': None,
-            'drop_pct': None,
+            # Phase 4b fields: populated only once a valid shakeout is
+            # observed (awaiting_reversal), else explicitly None.
+            **shake_fields,
+            # Phase 5 never populated for pending records.
             'reversal_date': None,
             'entry': None,
             'entry_vol': None,
             'dry90': bo['dry90'],
             'dry30': bo['dry30'],
             'pending': True,
+            'status': status,
         })
         # Skip forward past the rally window so we don't re-report the same
         # breakout from a nearby bar.
-        i = bo['rally_idx'] + 1
+        i = rally_idx + 1
     return pending
 
 
@@ -347,7 +477,10 @@ def check_today_events(df):
     today = df_prep.iloc[-1]['Date'].date()
 
     # Pending (waiting-for-reversal) breakouts from the last 60 days --
-    # this is what the daily watchlist is supposed to show.
+    # this is what the daily watchlist is supposed to show.  Tightened:
+    # only awaiting_shakeout / awaiting_reversal records whose 15-bar
+    # windows are still open; expired/failed (ABDL-type) breakouts are
+    # already excluded inside detect_pending_breakouts().
     pending = detect_pending_breakouts(df_prep, lookback_days=60)
 
     # breakout_today:
