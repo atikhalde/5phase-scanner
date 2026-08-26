@@ -1,0 +1,60 @@
+name: Full NSE EQ 5-Phase Scanner (Telegram Alerts)
+
+# Standalone scanner over the FULL NSE cash-equity universe (~2000 EQ symbols),
+# separate from the Nifty500 daily_scanner.yml. Same 5-phase logic; bigger
+# universe catches stocks outside Nifty500 (e.g. TVSSRICHAK).
+#
+# A ~2000-symbol scan takes far longer than the 15-min Nifty500 cadence, so this
+# runs ONCE per trading day at EOD (plus manual dispatch), not intraday.
+
+on:
+  schedule:
+    # EOD once per trading day: 15:45 IST = 10:15 UTC, Mon-Fri.
+    - cron: '15 10 * * 1-5'
+  workflow_dispatch:  # allow manual trigger
+
+# Independent of the Nifty500 scan so the two never cancel each other.
+concurrency:
+  group: full-eq-scan
+  cancel-in-progress: true
+
+jobs:
+  scan:
+    runs-on: ubuntu-latest
+    timeout-minutes: 350
+    steps:
+      - name: Checkout repo
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+
+      - name: Install dependencies
+        run: |
+          pip install --upgrade pip
+          pip install -r requirements.txt
+
+      - name: Run full-universe scanner
+        env:
+          TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
+          TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
+          # Dhan is the PRIMARY data source; yfinance is the fallback.
+          DHAN_CLIENT_ID: ${{ secrets.DHAN_CLIENT_ID }}
+          DHAN_ACCESS_TOKEN: ${{ secrets.DHAN_ACCESS_TOKEN }}
+          # Optional: cap symbols for a quick test run via manual dispatch.
+          # MAX_SYMBOLS: '100'
+        run: |
+          python full_scanner.py
+
+      - name: Upload full-scan artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: full-scan-${{ github.run_id }}
+          path: |
+            full_daily_watchlist_*.csv
+            full_breakouts_today_*.csv
+            full_reversals_today_*.csv
+            full_recent_reversals_fired_*.csv
+          if-no-files-found: ignore
