@@ -32,7 +32,25 @@ This fixes:
 2. Get chat ID: send message to bot, then `https://api.telegram.org/bot<TOKEN>/getUpdates`
 3. In GitHub repo → Settings → Secrets and variables → Actions → New repository secret → add `TELEGRAM_BOT_TOKEN` and `TELEGRAM_CHAT_ID`
 
-### 2. Past Backtest ( `backtest_5y.yml` )
+### 2. Full NSE EQ Scanner (`full_scanner.py`) — NEW
+> ⚙️ **Activate the workflow:** the CI file is provided at `workflow_templates/full_scanner.yml`. Copy it to `.github/workflows/full_scanner.yml` and commit (this must be done by a user/token with the GitHub `workflows` permission — the automated agent cannot create workflow files). Once committed it runs on the schedule below. You can also just run `python full_scanner.py` anytime.
+
+- **Schedule:** Once per trading day at EOD 15:45 IST (10:15 UTC Mon-Fri) + manual dispatch
+- **Universe:** FULL NSE cash equity (~2000 symbols, `SERIES == EQ` from NSE `EQUITY_L.csv`) — NOT just Nifty500
+- **Why:** `daily_scanner.py` only scans Nifty500, so stocks outside that index (e.g. **TVSSRICHAK** / TVS Srichakra) are never fetched and can never fire an alert — even though the full-universe backtest produced trades for them. This scanner covers them.
+- **Logic:** *Identical* 5-phase engine as the daily scanner. `full_scanner.py` reuses `scanner.py`, the data-fetch/freshness helpers from `daily_scanner.py`, and the formatters from `telegram_helper.py` — nothing in the existing files is modified.
+- **Alerts:** same three — Watchlist (breakout waiting shakeout), Breakout Today (Phase3), Reversal Entry Today (Phase5)
+- **Artifacts:** `full_*` prefixed CSVs so they never collide with the Nifty500 scanner's output
+- **Same secrets** as the daily scanner (`TELEGRAM_BOT_TOKEN`, `TELEGRAM_CHAT_ID`, `DHAN_CLIENT_ID`, `DHAN_ACCESS_TOKEN`)
+- **Run time:** a ~2000-symbol scan takes far longer than the 15-min Nifty500 cadence, hence EOD-only (workflow timeout 350 min)
+
+Local test (cap symbols for speed):
+```bash
+export MAX_SYMBOLS=50
+python full_scanner.py
+```
+
+### 3. Past Backtest ( `backtest_5y.yml` )
 - **Runs:** Last 5 years on Nifty500 (500 tickers) with same 1291-trade logic
 - **Output:** `backtest_5y_nifty500.csv` (sorted latest breakout first, symbol first) + `backtest_5y_report.pdf` with:
   - Summary stats, yearly breakdown, trades/month
@@ -46,10 +64,12 @@ This fixes:
 
 ## Files
 - `scanner.py` — exact same conditions
-- `daily_scanner.py` — daily watchlist + live alerts
+- `daily_scanner.py` — daily watchlist + live alerts (Nifty500)
+- `full_scanner.py` — same logic, FULL NSE EQ (~2000 symbols); standalone, reuses `scanner.py`/`daily_scanner.py`/`telegram_helper.py` without modifying them
 - `telegram_helper.py` — Telegram sender
 - `backtest_5y.py` — 5Y backtest + PDF
 - `.github/workflows/daily_scanner.yml`
+- `workflow_templates/full_scanner.yml` — copy to `.github/workflows/` to enable the full-EQ scan (needs `workflows` permission to commit)
 - `.github/workflows/backtest_5y.yml`
 - `requirements.txt`
 
