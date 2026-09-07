@@ -48,18 +48,28 @@ def format_shakeout_alert(trade, ticker):
     rally_high = trade.get('rally_high', '')
     shake_low = trade.get('shake_low', '')
     shake_low_vol = trade.get('shake_low_vol', '')
+    shake_high = trade.get('shake_high', '')
     drop_pct = trade.get('drop_pct', '')
     dry90 = trade.get('dry90', '')
-    days_since = trade.get('days_since', '')
+
+    # Honest level line: the low actually reached the zone (detector-guaranteed)
+    try:
+        if float(shake_low) < float(anchor_high):
+            level_line = f"Level Reached: wick below anchor {anchor_high} (zone {anchor_high} - {breakout_close})"
+        else:
+            level_line = f"Level Reached: OB/Breakout {breakout_close} (low {shake_low} in zone {anchor_high} - {breakout_close})"
+    except (TypeError, ValueError):
+        level_line = f"Level Tested: Supply/OB Zone ({anchor_high} - {breakout_close})"
 
     return (
         f"⚡ *SHAKEOUT / PULLBACK ALERT* `{ticker}`\n"
-        f"📍 *Phase 4b: Low-Vol Pullback Touching SSL / Supply / OB*\n"
-        f"Supply/Anchor: {anchor_high} on {anchor_date} ({days_since}d ago)\n"
+        f"📍 *Phase 4b: Low-Vol Pullback REACHED SSL / Supply / OB*\n"
+        f"Supply/Anchor: {anchor_high} on {anchor_date}\n"
         f"Breakout: {breakout_close} on {breakout_date} Vol {vol_break}x\n"
-        f"Rally High: {rally_high} on {rally_date}\n"
-        f"Shakeout Low: {shake_low} on {shake_date} Vol {shake_low_vol}x Drop {drop_pct}%\n"
-        f"Level Tested: Supply/OB Zone (~{anchor_high} - {breakout_close})\n"
+        f"Rally High: {rally_high} on {rally_date} (4a window)\n"
+        f"Shakeout Low: {shake_low} on {shake_date} Vol {shake_low_vol}x\n"
+        f"Off High {shake_high}: -{drop_pct}% (drawdown since breakout)\n"
+        f"{level_line}\n"
         f"Dry90: {dry90} | Awaiting Phase 5 Reversal Entry (Vol>0.6x)"
     )
 

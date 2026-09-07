@@ -24,7 +24,7 @@ This fixes:
 - **Alerts:**
   - Watchlist: breakout waiting shakeout / reversal
   - Breakout Today: Phase3 breakout today
-  - Shakeout / Pullback Today: Phase4b low-volume pullback touching SSL/Supply/OB today
+  - Shakeout / Pullback Today: Phase4b low-volume pullback whose low actually reaches the SSL/Supply/OB zone (anchor high → breakout close) today — a mere fall off the high does NOT alert
   - Reversal Entry Today: Phase5 entry today
 - **Telegram:** Requires GitHub Secrets `TELEGRAM_BOT_TOKEN` and `TELEGRAM_CHAT_ID`
 

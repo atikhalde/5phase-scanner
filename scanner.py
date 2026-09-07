@@ -467,18 +467,26 @@ def _is_phase3_breakout_bar(df, i, dry_thresh=8, vol_break=1.5):
     }
 
 
-def _is_phase4b_shakeout_today(df, pending_list, today_idx, vol_shake_max=1.0, drop_min=4, drop_max=25):
+def _is_phase4b_shakeout_today(df, pending_list, today_idx, vol_shake_max=1.0, drop_min=4, drop_max=25, wick_tol=0.02):
     """
     Checks if today's bar (today_idx = len(df) - 1) is a Phase 4b shakeout /
-    low-volume pullback touching the SSL / Supply / Order Block level.
+    low-volume pullback that TOUCHES the SSL / Supply / Order Block level.
 
     Conditions:
     1. A pending breakout exists with Phase 4a (rally continuation) confirmed.
     2. Today is in the Phase 4b shakeout window (rally_idx + 1 .. rally_idx + 15).
     3. Today's volume is low (VolRatio < vol_shake_max, i.e. < 1.0x).
-    4. Today's price drops 4-25% from the rally/shake high, touching or testing
-       the supply / SSL / anchor level (anchor_high) or order block (breakout zone).
-    5. No Phase 5 reversal has fired yet.
+    4. The drawdown from the highest High since the breakout to today's Low is
+       within drop_min..drop_max (4-25%). NOTE: this is a cumulative
+       drawdown since the breakout, not a single-day move.
+    5. LEVEL TOUCH (required): today's Low must actually reach the
+       supply/OB zone [anchor_high, breakout_close]:
+           anchor_high * (1 - wick_tol) <= today_low <= breakout_close
+       A wick up to `wick_tol` (2%) below the anchor is tolerated
+       (stop-hunt wick); deeper = breakdown, not a shakeout. A low that
+       stays above breakout_close has NOT tested the level -> no alert
+       (a mere pullback in a falling stock is not a Phase 4b touch).
+    6. No Phase 5 reversal has fired yet.
     """
     if not pending_list or today_idx < 1:
         return None
@@ -515,14 +523,25 @@ def _is_phase4b_shakeout_today(df, pending_list, today_idx, vol_shake_max=1.0, d
         if drop_today < drop_min or drop_today > drop_max:
             continue
 
+        anchor_high = bo['anchor_high']
+        breakout_high = bo['breakout_high']
+        breakout_close = bo['breakout_close']
+
+        # --- LEVEL TOUCH (the whole point of Phase 4b) ---
+        # The supply/OB zone is [anchor_high, breakout_close] (dry high ->
+        # breakout shelf). Today's low must actually reach it:
+        #   * at/below breakout_close  -> it tested the OB/breakout level
+        #   * not deeper than anchor_high*(1-wick_tol) -> beyond that is a
+        #     breakdown (falling knife through support), not a shakeout.
+        zone_top = float(breakout_close)
+        zone_floor = float(anchor_high) * (1.0 - wick_tol)
+        if not (zone_floor <= today_low <= zone_top):
+            continue
+
         window_lows = df.iloc[rally_idx + 1:today_idx + 1]['Low'].min()
         if today_low > window_lows * 1.005:
             if str(bo.get('shake_low_date')) != str(today_date):
                 continue
-
-        anchor_high = bo['anchor_high']
-        breakout_high = bo['breakout_high']
-        breakout_close = bo['breakout_close']
 
         return {
             'anchor_date': bo['anchor_date'],
