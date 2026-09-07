@@ -55,6 +55,7 @@ jobs:
           path: |
             full_daily_watchlist_*.csv
             full_breakouts_today_*.csv
+            full_shakeouts_today_*.csv
             full_reversals_today_*.csv
             full_recent_reversals_fired_*.csv
           if-no-files-found: ignore

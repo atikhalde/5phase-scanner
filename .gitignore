@@ -2,10 +2,12 @@ __pycache__/
 *.pyc
 daily_watchlist_*.csv
 breakouts_today_*.csv
+shakeouts_today_*.csv
 reversals_today_*.csv
 recent_reversals_fired_*.csv
 full_daily_watchlist_*.csv
 full_breakouts_today_*.csv
+full_shakeouts_today_*.csv
 full_reversals_today_*.csv
 full_recent_reversals_fired_*.csv
 nse_eq_universe.csv

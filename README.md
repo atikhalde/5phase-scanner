@@ -22,8 +22,9 @@ This fixes:
 - **Schedule:** Every 15 min during NSE market hours 9:30-15:30 IST (04:00-10:00 UTC Mon-Fri) + EOD 15:45 IST (10:15 UTC)
 - **Universe:** Nifty500 (as per your selection) — change in `daily_scanner.py` to full EQ 2075 if needed
 - **Alerts:**
-  - Watchlist: breakout in last 7 days waiting shakeout
+  - Watchlist: breakout waiting shakeout / reversal
   - Breakout Today: Phase3 breakout today
+  - Shakeout / Pullback Today: Phase4b low-volume pullback touching SSL/Supply/OB today
   - Reversal Entry Today: Phase5 entry today
 - **Telegram:** Requires GitHub Secrets `TELEGRAM_BOT_TOKEN` and `TELEGRAM_CHAT_ID`
 
@@ -39,7 +40,7 @@ This fixes:
 - **Universe:** FULL NSE cash equity (~2000 symbols, `SERIES == EQ` from NSE `EQUITY_L.csv`) — NOT just Nifty500
 - **Why:** `daily_scanner.py` only scans Nifty500, so stocks outside that index (e.g. **TVSSRICHAK** / TVS Srichakra) are never fetched and can never fire an alert — even though the full-universe backtest produced trades for them. This scanner covers them.
 - **Logic:** *Identical* 5-phase engine as the daily scanner. `full_scanner.py` reuses `scanner.py`, the data-fetch/freshness helpers from `daily_scanner.py`, and the formatters from `telegram_helper.py` — nothing in the existing files is modified.
-- **Alerts:** same three — Watchlist (breakout waiting shakeout), Breakout Today (Phase3), Reversal Entry Today (Phase5)
+- **Alerts:** four — Watchlist (breakout waiting shakeout/reversal), Breakout Today (Phase3), Shakeout / Pullback Today (Phase4b), Reversal Entry Today (Phase5)
 - **Artifacts:** `full_*` prefixed CSVs so they never collide with the Nifty500 scanner's output
 - **Same secrets** as the daily scanner (`TELEGRAM_BOT_TOKEN`, `TELEGRAM_CHAT_ID`, `DHAN_CLIENT_ID`, `DHAN_ACCESS_TOKEN`)
 - **Run time:** a ~2000-symbol scan takes far longer than the 15-min Nifty500 cadence, hence EOD-only (workflow timeout 350 min)
