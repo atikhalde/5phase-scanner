@@ -36,6 +36,33 @@ def format_breakout_alert(trade, ticker):
         f"Dry90: {trade['dry90']} | {tail}"
     )
 
+def format_shakeout_alert(trade, ticker):
+    anchor_date = trade['anchor_date'].strftime('%Y-%m-%d') if hasattr(trade['anchor_date'], 'strftime') else str(trade['anchor_date'])
+    breakout_date = trade['breakout_date'].strftime('%Y-%m-%d') if hasattr(trade['breakout_date'], 'strftime') else str(trade['breakout_date'])
+    rally_date = trade['rally_high_date'].strftime('%Y-%m-%d') if hasattr(trade['rally_high_date'], 'strftime') else str(trade['rally_high_date'])
+    shake_date = trade['shake_low_date'].strftime('%Y-%m-%d') if hasattr(trade['shake_low_date'], 'strftime') else str(trade['shake_low_date'])
+
+    anchor_high = trade.get('anchor_high', '')
+    breakout_close = trade.get('breakout_close', '')
+    vol_break = trade.get('vol_break', '')
+    rally_high = trade.get('rally_high', '')
+    shake_low = trade.get('shake_low', '')
+    shake_low_vol = trade.get('shake_low_vol', '')
+    drop_pct = trade.get('drop_pct', '')
+    dry90 = trade.get('dry90', '')
+    days_since = trade.get('days_since', '')
+
+    return (
+        f"⚡ *SHAKEOUT / PULLBACK ALERT* `{ticker}`\n"
+        f"📍 *Phase 4b: Low-Vol Pullback Touching SSL / Supply / OB*\n"
+        f"Supply/Anchor: {anchor_high} on {anchor_date} ({days_since}d ago)\n"
+        f"Breakout: {breakout_close} on {breakout_date} Vol {vol_break}x\n"
+        f"Rally High: {rally_high} on {rally_date}\n"
+        f"Shakeout Low: {shake_low} on {shake_date} Vol {shake_low_vol}x Drop {drop_pct}%\n"
+        f"Level Tested: Supply/OB Zone (~{anchor_high} - {breakout_close})\n"
+        f"Dry90: {dry90} | Awaiting Phase 5 Reversal Entry (Vol>0.6x)"
+    )
+
 def format_reversal_alert(trade, ticker):
     reversal_date = trade['reversal_date'].strftime('%Y-%m-%d') if hasattr(trade['reversal_date'], 'strftime') else str(trade['reversal_date'])
     shake_low_date = trade['shake_low_date'].strftime('%Y-%m-%d') if hasattr(trade['shake_low_date'], 'strftime') else str(trade['shake_low_date'])

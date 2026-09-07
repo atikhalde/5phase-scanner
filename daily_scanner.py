@@ -29,7 +29,14 @@ import os, sys, time, pandas as pd, csv, io, requests
 from datetime import datetime, timedelta
 from zoneinfo import ZoneInfo
 from scanner import scan_5phase, prepare_df, check_today_events, get_watchlist
-from telegram_helper import send_telegram_message, format_breakout_alert, format_reversal_alert, format_watchlist, format_recent_reversals_fired
+from telegram_helper import (
+    send_telegram_message,
+    format_breakout_alert,
+    format_shakeout_alert,
+    format_reversal_alert,
+    format_watchlist,
+    format_recent_reversals_fired,
+)
 
 IST = ZoneInfo("Asia/Kolkata")
 
@@ -323,6 +330,7 @@ def run_daily_scan():
     print(f"Scanning {len(symbols)}")
 
     breakout_today = []
+    shakeout_today = []
     reversal_today = []
     watchlist_all = []
     watchlist_30 = []
@@ -362,6 +370,10 @@ def run_daily_scan():
                 tr = result['breakout_today']
                 tr['ticker'] = f"{sym}.NS"
                 breakout_today.append(tr)
+            if result.get('shakeout_today'):
+                tr = result['shakeout_today']
+                tr['ticker'] = f"{sym}.NS"
+                shakeout_today.append(tr)
             if result['reversal_today']:
                 tr = result['reversal_today']
                 tr['ticker'] = f"{sym}.NS"
@@ -376,7 +388,7 @@ def run_daily_scan():
                 w['ticker'] = f"{sym}.NS"
                 watchlist_60.append(w)
             if idx % 50 == 0:
-                print(f"[{idx}] {sym}.NS B/O today:{len(breakout_today)} Rev today:{len(reversal_today)} Watch30:{len(watchlist_30)} Watch60:{len(watchlist_60)}")
+                print(f"[{idx}] {sym}.NS B/O today:{len(breakout_today)} Shake today:{len(shakeout_today)} Rev today:{len(reversal_today)} Watch30:{len(watchlist_30)} Watch60:{len(watchlist_60)}")
             time.sleep(0.15)
         except Exception as e:
             print(f"{sym} error {e}")
@@ -393,6 +405,7 @@ def run_daily_scan():
     watchlist_30 = dedup(watchlist_30)
     watchlist_60 = dedup(watchlist_60)
     breakout_today = dedup(breakout_today)
+    shakeout_today = dedup(shakeout_today)
     reversal_today = dedup(reversal_today)
 
     final_watchlist = watchlist_30
@@ -442,6 +455,7 @@ def run_daily_scan():
         send_telegram_message(bot_token, chat_id, msg)
         # Still save CSVs so the run has artifacts
         pd.DataFrame(breakout_today).to_csv(f"breakouts_today_{today_str}.csv", index=False)
+        pd.DataFrame(shakeout_today).to_csv(f"shakeouts_today_{today_str}.csv", index=False)
         pd.DataFrame(reversal_today).to_csv(f"reversals_today_{today_str}.csv", index=False)
         pd.DataFrame(final_watchlist).to_csv(f"daily_watchlist_{today_str}.csv", index=False)
         print("Daily scan done (coverage guard - no live data)")
@@ -497,6 +511,14 @@ def run_daily_scan():
     else:
         print(f"🔍 No new breakouts today {today_str}")
 
+    if shakeout_today:
+        for tr in shakeout_today:
+            msg = format_shakeout_alert(tr, tr['ticker'])
+            print(msg)
+            send_telegram_message(bot_token, chat_id, msg)
+    else:
+        print(f"📉 No shakeout / pullback touches today {today_str}")
+
     if reversal_today:
         for tr in reversal_today:
             msg = format_reversal_alert(tr, tr['ticker'])
@@ -508,6 +530,7 @@ def run_daily_scan():
     pd.DataFrame(final_watchlist).to_csv(f"daily_watchlist_{today_str}.csv", index=False)
     pd.DataFrame(recent_reversals_fired).to_csv(f"recent_reversals_fired_{today_str}.csv", index=False)
     pd.DataFrame(breakout_today).to_csv(f"breakouts_today_{today_str}.csv", index=False)
+    pd.DataFrame(shakeout_today).to_csv(f"shakeouts_today_{today_str}.csv", index=False)
     pd.DataFrame(reversal_today).to_csv(f"reversals_today_{today_str}.csv", index=False)
     print("Daily scan done")
 

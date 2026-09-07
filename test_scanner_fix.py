@@ -31,7 +31,9 @@ import numpy as np
 from scanner import (
     prepare_df, scan_5phase, detect_pending_breakouts,
     check_today_events, _check_breakout_confirmed, _is_phase3_breakout_bar,
+    _is_phase4b_shakeout_today,
 )
+from telegram_helper import format_shakeout_alert
 
 
 # ---------------------------------------------------------------------------
@@ -507,6 +509,43 @@ def test_expired_reversal_window_excluded():
           f"B/O {carved_date} not in pending ({len(pending)} pending left)")
 
 
+def test_shakeout_today_fires():
+    """Phase 4b shakeout / low-volume pullback touching SSL/supply/OB level
+    on the current day produces a shakeout_today alert."""
+    df = make_synthetic(seed=6, with_shakeout_pending=True)
+    n = len(df)
+    # The shakeout low was carved at sh = (n-20) + 3 + 5
+    sh = (n - 20) + 3 + 5
+    # Cut dataframe up to the shakeout day so today IS the shakeout day
+    df_shake = df.iloc[:sh + 1].copy().reset_index(drop=True)
+    res = check_today_events(df_shake)
+    assert res.get('shakeout_today') is not None, "shakeout_today should fire on shakeout day"
+    st = res['shakeout_today']
+    assert st['shake_low'] == 122.0
+    assert st['drop_pct'] == 11.59
+    assert st['shake_low_vol'] < 1.0
+    assert st['supply_level'] == 130.0
+    assert st['status'] == 'shakeout_touch'
+    print(f"[10] shakeout_today fires on shakeout day: date={st['shake_low_date']} "
+          f"low={st['shake_low']} drop={st['drop_pct']}% vol={st['shake_low_vol']}x")
+
+
+def test_format_shakeout_alert():
+    df = make_synthetic(seed=6, with_shakeout_pending=True)
+    sh = (len(df) - 20) + 3 + 5
+    df_shake = df.iloc[:sh + 1].copy().reset_index(drop=True)
+    res = check_today_events(df_shake)
+    st = res['shakeout_today']
+    st['ticker'] = 'TESTSTOCK.NS'
+    msg = format_shakeout_alert(st, st['ticker'])
+    assert "SHAKEOUT / PULLBACK ALERT" in msg
+    assert "TESTSTOCK.NS" in msg
+    assert "Phase 4b" in msg
+    assert "Supply/Anchor: 130.0" in msg
+    assert "Shakeout Low: 122.0" in msg
+    print("[11] format_shakeout_alert produces valid Telegram Markdown message")
+
+
 if __name__ == "__main__":
     test_scan_5phase_unchanged()
     test_pending_breakout_detected()
@@ -517,4 +556,6 @@ if __name__ == "__main__":
     test_awaiting_reversal_status()
     test_expired_shakeout_excluded()
     test_expired_reversal_window_excluded()
-    print("\nAll 9 tests passed.")
+    test_shakeout_today_fires()
+    test_format_shakeout_alert()
+    print("\nAll 11 tests passed.")

@@ -467,11 +467,93 @@ def _is_phase3_breakout_bar(df, i, dry_thresh=8, vol_break=1.5):
     }
 
 
+def _is_phase4b_shakeout_today(df, pending_list, today_idx, vol_shake_max=1.0, drop_min=4, drop_max=25):
+    """
+    Checks if today's bar (today_idx = len(df) - 1) is a Phase 4b shakeout /
+    low-volume pullback touching the SSL / Supply / Order Block level.
+
+    Conditions:
+    1. A pending breakout exists with Phase 4a (rally continuation) confirmed.
+    2. Today is in the Phase 4b shakeout window (rally_idx + 1 .. rally_idx + 15).
+    3. Today's volume is low (VolRatio < vol_shake_max, i.e. < 1.0x).
+    4. Today's price drops 4-25% from the rally/shake high, touching or testing
+       the supply / SSL / anchor level (anchor_high) or order block (breakout zone).
+    5. No Phase 5 reversal has fired yet.
+    """
+    if not pending_list or today_idx < 1:
+        return None
+    today_row = df.loc[today_idx]
+    today_date = today_row['Date']
+    today_vol = today_row.get('VolRatio')
+    if pd.isna(today_vol) or today_vol >= vol_shake_max:
+        return None
+
+    # Check against pending breakouts (most recent first)
+    for bo in reversed(pending_list):
+        bdate = bo.get('breakout_date')
+        rdate = bo.get('rally_high_date')
+        if not bdate or not rdate:
+            continue
+        b_matches = df[df['Date'] == bdate].index
+        r_matches = df[df['Date'] == rdate].index
+        if len(b_matches) == 0 or len(r_matches) == 0:
+            continue
+        bo_idx = b_matches[-1]
+        rally_idx = r_matches[-1]
+
+        if not (rally_idx < today_idx <= rally_idx + 15):
+            continue
+
+        shake_window = df.iloc[bo_idx:today_idx + 1]
+        shake_high = shake_window['High'].max()
+        if pd.isna(shake_high) or shake_high <= 0:
+            continue
+
+        today_low = float(today_row['Low'])
+        drop_today = (shake_high - today_low) / shake_high * 100.0
+
+        if drop_today < drop_min or drop_today > drop_max:
+            continue
+
+        window_lows = df.iloc[rally_idx + 1:today_idx + 1]['Low'].min()
+        if today_low > window_lows * 1.005:
+            if str(bo.get('shake_low_date')) != str(today_date):
+                continue
+
+        anchor_high = bo['anchor_high']
+        breakout_high = bo['breakout_high']
+        breakout_close = bo['breakout_close']
+
+        return {
+            'anchor_date': bo['anchor_date'],
+            'anchor_high': anchor_high,
+            'days_since': bo['days_since'],
+            'breakout_date': bo['breakout_date'],
+            'breakout_high': breakout_high,
+            'breakout_close': breakout_close,
+            'vol_break': bo['vol_break'],
+            'rally_high_date': bo['rally_high_date'],
+            'rally_high': bo['rally_high'],
+            'shake_low_date': today_date,
+            'shake_low': round(today_low, 2),
+            'shake_low_vol': round(float(today_vol), 2),
+            'shake_high': round(float(shake_high), 2),
+            'drop_pct': round(float(drop_today), 2),
+            'supply_level': anchor_high,
+            'dry90': bo['dry90'],
+            'dry30': bo['dry30'],
+            'pending': True,
+            'status': 'shakeout_touch',
+        }
+
+    return None
+
+
 def check_today_events(df):
     if len(df) < 250:
-        return {'breakout_today': None, 'watchlist': [], 'reversal_today': None,
-                'all_trades': [], 'watchlist_30': [], 'watchlist_60': [],
-                'pending_breakouts': []}
+        return {'breakout_today': None, 'shakeout_today': None, 'watchlist': [],
+                'reversal_today': None, 'all_trades': [], 'watchlist_30': [],
+                'watchlist_60': [], 'pending_breakouts': []}
     df_prep = prepare_df(df)
     trades = scan_5phase(df_prep)
     today = df_prep.iloc[-1]['Date'].date()
@@ -496,6 +578,10 @@ def check_today_events(df):
             reversal_today = tr
             break
 
+    # shakeout_today:
+    # Phase 4b low-volume pullback / shakeout touching SSL / Supply / Order Block today
+    shakeout_today = _is_phase4b_shakeout_today(df_prep, pending, len(df_prep) - 1)
+
     # Watchlist 30/60 days waiting: combine completed (reversal future --
     # normally empty on live data by construction) with pending breakouts.
     waiting_pool = list(trades) + list(pending)
@@ -507,6 +593,7 @@ def check_today_events(df):
 
     return {
         'breakout_today': breakout_today,
+        'shakeout_today': shakeout_today,
         'reversal_today': reversal_today,
         'watchlist': watchlist,
         'watchlist_30': watchlist_30,
