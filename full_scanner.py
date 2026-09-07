@@ -290,6 +290,7 @@ def run_full_scan():
     header = (
         f"📊 *5-Phase Scanner Daily Report (FULL NSE EQ)* {today_str} IST (1291-trade logic)\n"
         f"Universe: {len(symbols)} EQ | Live data: {live_ok}/{len(symbols)} | Stale: {stale_count} | Data date: {latest_data_date or 'N/A'}\n"
+        f"Today: Breakouts {len(breakout_today)} | Shakeouts {len(shakeout_today)} | Reversals {len(reversal_today)} | Watchlist {len(final_watchlist)}\n"
         f"Watchlist window: last {window_used} days (30d first verified, then 60d) | Dhan primary, yfinance fallback\n"
     )
 
@@ -367,9 +368,13 @@ def run_full_scan():
 
     if shakeout_today:
         for tr in shakeout_today:
-            msg = format_shakeout_alert(tr, tr['ticker'])
-            print(msg)
-            send_telegram_message(bot_token, chat_id, msg)
+            try:
+                msg = format_shakeout_alert(tr, tr['ticker'])
+                print(msg)
+                send_telegram_message(bot_token, chat_id, msg)
+            except Exception as e:
+                print(f"shakeout alert send failed {tr.get('ticker')}: {e}")
+                continue
     else:
         print(f"📉 No shakeout / pullback touches today {today_str}")
 

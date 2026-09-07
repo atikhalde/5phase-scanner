@@ -1,17 +1,64 @@
 import os
 import requests
 
+# Telegram hard limit is 4096. Stay under it; split on newlines.
+TELEGRAM_MAX_LEN = 3900
+
+
+def _post_telegram(bot_token, chat_id, text, parse_mode):
+    url = f"https://api.telegram.org/bot{bot_token}/sendMessage"
+    payload = {"chat_id": chat_id, "text": text, "disable_web_page_preview": True}
+    if parse_mode:
+        payload["parse_mode"] = parse_mode
+    resp = requests.post(url, json=payload, timeout=10)
+    print(f"Telegram response: {resp.status_code} {resp.text[:200]}")
+    return resp
+
+
+def _split_telegram_text(message, limit=TELEGRAM_MAX_LEN):
+    if len(message) <= limit:
+        return [message]
+    chunks, rest = [], message
+    while rest:
+        if len(rest) <= limit:
+            chunks.append(rest)
+            break
+        cut = rest.rfind('\n', 0, limit)
+        if cut < limit // 3:
+            cut = limit
+        chunks.append(rest[:cut])
+        rest = rest[cut:].lstrip('\n')
+    return chunks
+
+
 def send_telegram_message(bot_token, chat_id, message, parse_mode="Markdown"):
+    """Send a Telegram message.
+
+    Legacy Markdown is brittle (unmatched *, _, etc. -> HTTP 400 and the
+    alert is silently dropped). If Markdown is rejected we retry as plain
+    text so breakout/shakeout/watchlist alerts still arrive. Long reports
+    are split into <4096-char chunks.
+    """
     if not bot_token or not chat_id:
         print("Telegram credentials missing, skipping send")
         print(message)
         return False
-    url = f"https://api.telegram.org/bot{bot_token}/sendMessage"
-    payload = {"chat_id": chat_id, "text": message, "parse_mode": parse_mode, "disable_web_page_preview": True}
+    ok_all = True
     try:
-        resp = requests.post(url, json=payload, timeout=10)
-        print(f"Telegram response: {resp.status_code} {resp.text[:200]}")
-        return resp.status_code == 200
+        for chunk in _split_telegram_text(message):
+            resp = _post_telegram(bot_token, chat_id, chunk, parse_mode)
+            if resp.status_code == 200:
+                continue
+            # 400 can't parse entities -> retry without parse_mode
+            body = (resp.text or '').lower()
+            if resp.status_code == 400 and ('parse' in body or 'entities' in body or parse_mode):
+                print("Telegram Markdown rejected; retrying as plain text")
+                resp2 = _post_telegram(bot_token, chat_id, chunk, None)
+                if resp2.status_code != 200:
+                    ok_all = False
+            else:
+                ok_all = False
+        return ok_all
     except Exception as e:
         print(f"Telegram send error: {e}")
         return False
@@ -63,7 +110,7 @@ def format_shakeout_alert(trade, ticker):
 
     return (
         f"⚡ *SHAKEOUT / PULLBACK ALERT* `{ticker}`\n"
-        f"📍 *Phase 4b: Low-Vol Pullback REACHED SSL / Supply / OB*\n"
+        f"Phase 4b: Low-Vol Pullback REACHED SSL/Supply/OB\n"
         f"Supply/Anchor: {anchor_high} on {anchor_date}\n"
         f"Breakout: {breakout_close} on {breakout_date} Vol {vol_break}x\n"
         f"Rally High: {rally_high} on {rally_date} (4a window)\n"

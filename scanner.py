@@ -467,6 +467,65 @@ def _is_phase3_breakout_bar(df, i, dry_thresh=8, vol_break=1.5):
     }
 
 
+def _safe_float(x):
+    """Scalar float or None. Never raises; never returns a truth-ambiguous value."""
+    try:
+        if x is None:
+            return None
+        if pd.isna(x):
+            return None
+        v = float(x)
+        if np.isnan(v) or np.isinf(v):
+            return None
+        return v
+    except (TypeError, ValueError):
+        return None
+
+
+def _idx_for_date(df, d):
+    """Index of bar matching date `d`. Exact match first, then calendar-day match.
+
+    Live Dhan/yfinance dates sometimes disagree with pending metadata on tz or
+    time-of-day; a missed match used to silently skip a real shakeout.
+    """
+    if d is None:
+        return None
+    try:
+        if pd.isna(d):
+            return None
+    except (ValueError, TypeError):
+        pass
+    exact = df[df['Date'] == d].index
+    if len(exact) > 0:
+        return int(exact[-1])
+    try:
+        target = pd.Timestamp(d)
+        if getattr(target, 'tzinfo', None) is not None:
+            try:
+                target = target.tz_convert('Asia/Kolkata').tz_localize(None)
+            except (TypeError, AttributeError):
+                try:
+                    target = target.tz_localize(None)
+                except Exception:
+                    pass
+        target = target.normalize()
+        col = pd.to_datetime(df['Date'], errors='coerce')
+        try:
+            if getattr(col.dt, 'tz', None) is not None:
+                col = col.dt.tz_convert('Asia/Kolkata').dt.tz_localize(None)
+        except (TypeError, AttributeError):
+            try:
+                col = col.dt.tz_localize(None)
+            except Exception:
+                pass
+        matches = df[col.dt.normalize() == target].index
+        if len(matches) > 0:
+            return int(matches[-1])
+    except Exception:
+        return None
+    return None
+
+
 def _is_phase4b_shakeout_today(df, pending_list, today_idx, vol_shake_max=1.0, drop_min=4, drop_max=25, wick_tol=0.02):
     """
     Checks if today's bar (today_idx = len(df) - 1) is a Phase 4b shakeout /
@@ -480,90 +539,111 @@ def _is_phase4b_shakeout_today(df, pending_list, today_idx, vol_shake_max=1.0, d
        within drop_min..drop_max (4-25%). NOTE: this is a cumulative
        drawdown since the breakout, not a single-day move.
     5. LEVEL TOUCH (required): today's Low must actually reach the
-       supply/OB zone [anchor_high, breakout_close]:
-           anchor_high * (1 - wick_tol) <= today_low <= breakout_close
+       supply/OB zone:
+           zone_floor = anchor_high * (1 - wick_tol)
+           zone_top   = max(breakout_close, breakout_high) * 1.002
+           zone_floor <= today_low <= zone_top
+       The 0.2% cap above the breakout bar covers round-off (e.g. low 520.0
+       vs close 519.8 / high 520.75) without re-admitting the 2026-09-07
+       DCBBANK/FMGOETZE class (7.1% / 2.3% above the zone).
        A wick up to `wick_tol` (2%) below the anchor is tolerated
-       (stop-hunt wick); deeper = breakdown, not a shakeout. A low that
-       stays above breakout_close has NOT tested the level -> no alert
-       (a mere pullback in a falling stock is not a Phase 4b touch).
+       (stop-hunt wick); deeper = breakdown, not a shakeout.
     6. No Phase 5 reversal has fired yet.
+
+    This function is defensive: bad/missing fields skip that pending record
+    instead of raising. check_today_events also isolates it so a 4b failure
+    can never suppress Phase 3 breakout / watchlist / reversal alerts.
     """
     if not pending_list or today_idx < 1:
         return None
-    today_row = df.loc[today_idx]
-    today_date = today_row['Date']
-    today_vol = today_row.get('VolRatio')
-    if pd.isna(today_vol) or today_vol >= vol_shake_max:
+    try:
+        today_row = df.loc[today_idx]
+        today_date = today_row['Date']
+        today_vol = _safe_float(today_row['VolRatio'] if 'VolRatio' in getattr(today_row, 'index', []) else today_row.get('VolRatio') if hasattr(today_row, 'get') else None)
+        if today_vol is None or today_vol >= vol_shake_max:
+            return None
+        today_low = _safe_float(today_row['Low'])
+        if today_low is None:
+            return None
+    except Exception as e:
+        print(f"phase4b today-bar read failed: {e}")
         return None
 
-    # Check against pending breakouts (most recent first)
     for bo in reversed(pending_list):
-        bdate = bo.get('breakout_date')
-        rdate = bo.get('rally_high_date')
-        if not bdate or not rdate:
-            continue
-        b_matches = df[df['Date'] == bdate].index
-        r_matches = df[df['Date'] == rdate].index
-        if len(b_matches) == 0 or len(r_matches) == 0:
-            continue
-        bo_idx = b_matches[-1]
-        rally_idx = r_matches[-1]
-
-        if not (rally_idx < today_idx <= rally_idx + 15):
-            continue
-
-        shake_window = df.iloc[bo_idx:today_idx + 1]
-        shake_high = shake_window['High'].max()
-        if pd.isna(shake_high) or shake_high <= 0:
-            continue
-
-        today_low = float(today_row['Low'])
-        drop_today = (shake_high - today_low) / shake_high * 100.0
-
-        if drop_today < drop_min or drop_today > drop_max:
-            continue
-
-        anchor_high = bo['anchor_high']
-        breakout_high = bo['breakout_high']
-        breakout_close = bo['breakout_close']
-
-        # --- LEVEL TOUCH (the whole point of Phase 4b) ---
-        # The supply/OB zone is [anchor_high, breakout_close] (dry high ->
-        # breakout shelf). Today's low must actually reach it:
-        #   * at/below breakout_close  -> it tested the OB/breakout level
-        #   * not deeper than anchor_high*(1-wick_tol) -> beyond that is a
-        #     breakdown (falling knife through support), not a shakeout.
-        zone_top = float(breakout_close)
-        zone_floor = float(anchor_high) * (1.0 - wick_tol)
-        if not (zone_floor <= today_low <= zone_top):
-            continue
-
-        window_lows = df.iloc[rally_idx + 1:today_idx + 1]['Low'].min()
-        if today_low > window_lows * 1.005:
-            if str(bo.get('shake_low_date')) != str(today_date):
+        try:
+            bdate = bo.get('breakout_date')
+            rdate = bo.get('rally_high_date')
+            if bdate is None or rdate is None:
+                continue
+            try:
+                if pd.isna(bdate) or pd.isna(rdate):
+                    continue
+            except (ValueError, TypeError):
+                pass
+            bo_idx = _idx_for_date(df, bdate)
+            rally_idx = _idx_for_date(df, rdate)
+            if bo_idx is None or rally_idx is None:
                 continue
 
-        return {
-            'anchor_date': bo['anchor_date'],
-            'anchor_high': anchor_high,
-            'days_since': bo['days_since'],
-            'breakout_date': bo['breakout_date'],
-            'breakout_high': breakout_high,
-            'breakout_close': breakout_close,
-            'vol_break': bo['vol_break'],
-            'rally_high_date': bo['rally_high_date'],
-            'rally_high': bo['rally_high'],
-            'shake_low_date': today_date,
-            'shake_low': round(today_low, 2),
-            'shake_low_vol': round(float(today_vol), 2),
-            'shake_high': round(float(shake_high), 2),
-            'drop_pct': round(float(drop_today), 2),
-            'supply_level': anchor_high,
-            'dry90': bo['dry90'],
-            'dry30': bo['dry30'],
-            'pending': True,
-            'status': 'shakeout_touch',
-        }
+            if not (rally_idx < today_idx <= rally_idx + 15):
+                continue
+
+            shake_window = df.iloc[bo_idx:today_idx + 1]
+            shake_high = _safe_float(shake_window['High'].max())
+            if shake_high is None or shake_high <= 0:
+                continue
+
+            drop_today = (shake_high - today_low) / shake_high * 100.0
+            if drop_today < drop_min or drop_today > drop_max:
+                continue
+
+            anchor_high = _safe_float(bo.get('anchor_high'))
+            breakout_high = _safe_float(bo.get('breakout_high'))
+            breakout_close = _safe_float(bo.get('breakout_close'))
+            if anchor_high is None or breakout_close is None:
+                continue
+            if breakout_high is None:
+                breakout_high = breakout_close
+
+            # Supply/SSL = anchor high. OB = the breakout bar (close AND high).
+            # Using only breakout_close as the ceiling rejected real touches
+            # whose low sat between close and high (round-off / upper wick).
+            zone_top = max(breakout_close, breakout_high) * 1.002
+            zone_floor = anchor_high * (1.0 - wick_tol)
+            if zone_floor > zone_top:
+                continue
+            if not (zone_floor <= today_low <= zone_top):
+                continue
+
+            window_lows = _safe_float(df.iloc[rally_idx + 1:today_idx + 1]['Low'].min())
+            if window_lows is not None and today_low > window_lows * 1.005:
+                if str(bo.get('shake_low_date')) != str(today_date):
+                    continue
+
+            return {
+                'anchor_date': bo['anchor_date'],
+                'anchor_high': anchor_high,
+                'days_since': bo['days_since'],
+                'breakout_date': bo['breakout_date'],
+                'breakout_high': breakout_high,
+                'breakout_close': breakout_close,
+                'vol_break': bo['vol_break'],
+                'rally_high_date': bo['rally_high_date'],
+                'rally_high': bo['rally_high'],
+                'shake_low_date': today_date,
+                'shake_low': round(today_low, 2),
+                'shake_low_vol': round(float(today_vol), 2),
+                'shake_high': round(float(shake_high), 2),
+                'drop_pct': round(float(drop_today), 2),
+                'supply_level': anchor_high,
+                'dry90': bo['dry90'],
+                'dry30': bo['dry30'],
+                'pending': True,
+                'status': 'shakeout_touch',
+            }
+        except Exception as e:
+            print(f"phase4b skip one pending: {e}")
+            continue
 
     return None
 
@@ -589,26 +669,38 @@ def check_today_events(df):
     #     can't have happened yet) -> immediate alert, OR
     #  2) a pending breakout whose Phase 3 was today (already 4a-confirmed
     #     would require future bars, so normally path 1 is the one).
-    breakout_today = _is_phase3_breakout_bar(df_prep, len(df_prep) - 1)
+    try:
+        breakout_today = _is_phase3_breakout_bar(df_prep, len(df_prep) - 1)
+    except Exception as e:
+        print(f"phase3 breakout detector failed (watchlist still returned): {e}")
+        breakout_today = None
 
     reversal_today = None
     for tr in trades:
-        if tr['reversal_date'].date() == today:
-            reversal_today = tr
-            break
+        try:
+            rdate = tr['reversal_date']
+            rd = rdate.date() if hasattr(rdate, 'date') else pd.to_datetime(rdate).date()
+            if rd == today:
+                reversal_today = tr
+                break
+        except Exception:
+            continue
 
-    # shakeout_today:
-    # Phase 4b low-volume pullback / shakeout touching SSL / Supply / Order Block today
-    shakeout_today = _is_phase4b_shakeout_today(df_prep, pending, len(df_prep) - 1)
-
-    # Watchlist 30/60 days waiting: combine completed (reversal future --
-    # normally empty on live data by construction) with pending breakouts.
+    # Watchlist FIRST so a Phase 4b failure can never blank the daily report
+    # or suppress Phase 3 breakout / Phase 5 reversal alerts (PR #5 regression).
     waiting_pool = list(trades) + list(pending)
     watchlist_30 = get_watchlist(waiting_pool, today, days=30, only_waiting=True)
     watchlist_60 = []
     if not watchlist_30:
         watchlist_60 = get_watchlist(waiting_pool, today, days=60, only_waiting=True)
     watchlist = watchlist_30 if watchlist_30 else watchlist_60
+
+    # shakeout_today: isolated -- any exception here must not drop other alerts.
+    try:
+        shakeout_today = _is_phase4b_shakeout_today(df_prep, pending, len(df_prep) - 1)
+    except Exception as e:
+        print(f"phase4b shakeout detector failed (breakout/watchlist still returned): {e}")
+        shakeout_today = None
 
     return {
         'breakout_today': breakout_today,

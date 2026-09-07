@@ -33,7 +33,7 @@ from scanner import (
     check_today_events, _check_breakout_confirmed, _is_phase3_breakout_bar,
     _is_phase4b_shakeout_today,
 )
-from telegram_helper import format_shakeout_alert
+from telegram_helper import format_shakeout_alert, _split_telegram_text, send_telegram_message
 
 
 # ---------------------------------------------------------------------------
@@ -591,7 +591,63 @@ def test_format_shakeout_alert():
     assert "Shakeout Low: 130.5" in msg
     assert "Off High 138.0: -5.43%" in msg
     assert "Level Reached: OB/Breakout 132.0 (low 130.5 in zone 130.0 - 132.0)" in msg
+    # Nested *bold* with slashes made Telegram reject the whole message
+    # (HTTP 400 can't parse entities) so the user saw nothing.
+    assert "*Phase 4b:" not in msg
     print("[11] format_shakeout_alert produces valid Telegram Markdown message (level touch stated truthfully)")
+
+
+def test_shakeout_fires_when_low_between_close_and_high():
+    """TI-like round-off: low sits between breakout_close and breakout_high.
+    PR #5 used close as a hard ceiling and silently dropped these touches."""
+    df = make_synthetic(seed=6, with_shakeout_pending=True, shake_low_override=132.2)
+    n = len(df)
+    sh = (n - 20) + 3 + 5
+    df_shake = df.iloc[:sh + 1].copy().reset_index(drop=True)
+    res = check_today_events(df_shake)
+    assert res.get('shakeout_today') is not None, (
+        f"low 132.2 between close 132.0 and high 132.5 should count as an OB touch, got {res.get('shakeout_today')}")
+    st = res['shakeout_today']
+    assert st['shake_low'] == 132.2
+    print(f"[14] low between breakout close and high still fires "
+          f"(low={st['shake_low']} close={st['breakout_close']} high={st['breakout_high']})")
+
+
+def test_breakout_survives_shakeout_crash():
+    """If the 4b detector raises, check_today_events must still return the
+    Phase 3 breakout (PR #5: the exception skipped the whole symbol)."""
+    import scanner as scanner_mod
+    df = make_synthetic(seed=3, with_breakout_today=True)
+    real = scanner_mod._is_phase4b_shakeout_today
+    def boom(*_a, **_k):
+        raise RuntimeError("synthetic 4b crash")
+    scanner_mod._is_phase4b_shakeout_today = boom
+    try:
+        res = scanner_mod.check_today_events(df)
+        assert res['breakout_today'] is not None, "Phase 3 breakout must survive a 4b crash"
+        assert res['shakeout_today'] is None
+    finally:
+        scanner_mod._is_phase4b_shakeout_today = real
+    print("[15] breakout_today survives a 4b detector exception")
+
+
+def test_telegram_splits_long_messages():
+    chunks = _split_telegram_text("hello\n" * 2000, limit=100)
+    assert all(len(c) <= 100 for c in chunks)
+    assert len(chunks) > 1
+    print(f"[16] telegram splitter: {len(chunks)} chunks from long body")
+
+
+def test_dcbbank_class_still_rejected_with_wider_ob():
+    """DCBBANK-class: low still well above max(close, high)*1.002. Stay silent."""
+    df = make_synthetic(seed=6, with_shakeout_pending=True,
+                        shake_low_override=134.5, rally_pad_high=150.0)
+    n = len(df)
+    sh = (n - 20) + 3 + 5
+    df_shake = df.iloc[:sh + 1].copy().reset_index(drop=True)
+    res = check_today_events(df_shake)
+    assert res['shakeout_today'] is None, "well above the OB must not alert"
+    print("[17] DCBBANK-class (low well above OB) still silent after zone-top tweak")
 
 
 if __name__ == "__main__":
@@ -608,4 +664,8 @@ if __name__ == "__main__":
     test_shakeout_not_fired_when_level_not_reached()
     test_shakeout_not_fired_when_level_broken()
     test_format_shakeout_alert()
-    print("\nAll 13 tests passed.")
+    test_shakeout_fires_when_low_between_close_and_high()
+    test_breakout_survives_shakeout_crash()
+    test_telegram_splits_long_messages()
+    test_dcbbank_class_still_rejected_with_wider_ob()
+    print("\nAll 17 tests passed.")
