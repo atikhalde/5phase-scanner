@@ -142,7 +142,8 @@ def original_scan_5phase(df, dry_thresh=8, vol_break=1.5, vol_shake_max=1.0,
 # ---------------------------------------------------------------------------
 def make_synthetic(n=600, seed=0, with_full_pattern=False, with_pending=False,
                    with_breakout_today=False, with_shakeout_pending=False,
-                   with_expired_shakeout=False):
+                   with_expired_shakeout=False, shake_low_override=None,
+                   rally_pad_high=None):
     rng = np.random.default_rng(seed)
     dates = pd.bdate_range('2023-01-02', periods=n)
     base = 100 + np.cumsum(rng.normal(0, 0.5, n))
@@ -280,29 +281,34 @@ def make_synthetic(n=600, seed=0, with_full_pattern=False, with_pending=False,
             df.loc[i+k, 'High'] = 135.0 + k
             df.loc[i+k, 'Close'] = 134.0 + k
         rally_idx = i + 3
+        pad_high = 138.0 if rally_pad_high is None else float(rally_pad_high)
         # Post-rally pads (same trick as with_full_pattern): not low-vol,
         # not below the intended shake low.
         for k in range(1, 5):
-            df.loc[rally_idx+k, 'High'] = 138.0
+            df.loc[rally_idx+k, 'High'] = pad_high
             df.loc[rally_idx+k, 'Low'] = 135.0
             df.loc[rally_idx+k, 'Close'] = 136.0
             df.loc[rally_idx+k, 'Open'] = 135.5
             df.loc[rally_idx+k, 'Volume'] = 1_000_000
-        # Valid shakeout at sh: low volume, drop = (138-122)/138 ~= 11.59%
+        # Valid shakeout at sh: low volume. Default low 122.0 (a 6% BREAKDOWN
+        # through the 130 anchor -- historical Phase 4 shakeout geometry);
+        # shake_low_override moves the low (e.g. 130.5 = a real level touch).
         sh = rally_idx + 5                    # = n-12, 11 quiet bars follow
-        df.loc[sh, 'Low'] = 122.0
-        df.loc[sh, 'High'] = 126.0
-        df.loc[sh, 'Close'] = 123.0
-        df.loc[sh, 'Open'] = 125.0
+        shake_low = 122.0 if shake_low_override is None else float(shake_low_override)
+        s = shake_low - 122.0
+        df.loc[sh, 'Low'] = shake_low
+        df.loc[sh, 'High'] = 126.0 + s
+        df.loc[sh, 'Close'] = 123.0 + s
+        df.loc[sh, 'Open'] = 125.0 + s
         df.loc[sh, 'Volume'] = 200_000
         # Bars after the shake low (reversal window still open): quiet, never
-        # below the shake low (122) and never closing above the shake bar's
-        # high (126), so no bullish reversal can fire.
+        # below the shake low and never closing above the shake bar's high,
+        # so no bullish reversal can fire.
         for k in range(sh+1, n):
-            df.loc[k, 'High'] = 125.5
-            df.loc[k, 'Low'] = 123.5
-            df.loc[k, 'Close'] = 124.5
-            df.loc[k, 'Open'] = 124.0
+            df.loc[k, 'High'] = 125.5 + s
+            df.loc[k, 'Low'] = 123.5 + s
+            df.loc[k, 'Close'] = 124.5 + s
+            df.loc[k, 'Open'] = 124.0 + s
             df.loc[k, 'Volume'] = 300_000
 
     if with_expired_shakeout:
@@ -510,28 +516,68 @@ def test_expired_reversal_window_excluded():
 
 
 def test_shakeout_today_fires():
-    """Phase 4b shakeout / low-volume pullback touching SSL/supply/OB level
-    on the current day produces a shakeout_today alert."""
-    df = make_synthetic(seed=6, with_shakeout_pending=True)
+    """Phase 4b alert fires when today's low-volume pullback low actually
+    REACHES the supply/OB zone [anchor_high, breakout_close] = [130.0, 132.0].
+    (low 130.5 -> inside the zone; drop = (138-130.5)/138 = 5.43%)"""
+    df = make_synthetic(seed=6, with_shakeout_pending=True, shake_low_override=130.5)
     n = len(df)
     # The shakeout low was carved at sh = (n-20) + 3 + 5
     sh = (n - 20) + 3 + 5
     # Cut dataframe up to the shakeout day so today IS the shakeout day
     df_shake = df.iloc[:sh + 1].copy().reset_index(drop=True)
     res = check_today_events(df_shake)
-    assert res.get('shakeout_today') is not None, "shakeout_today should fire on shakeout day"
+    assert res.get('shakeout_today') is not None, "shakeout_today should fire when the low reaches the zone"
     st = res['shakeout_today']
-    assert st['shake_low'] == 122.0
-    assert st['drop_pct'] == 11.59
+    assert st['shake_low'] == 130.5
+    # the low is inside the supply/OB zone
+    assert st['anchor_high'] <= st['shake_low'] <= st['breakout_close']
+    assert st['drop_pct'] == 5.43
     assert st['shake_low_vol'] < 1.0
     assert st['supply_level'] == 130.0
     assert st['status'] == 'shakeout_touch'
-    print(f"[10] shakeout_today fires on shakeout day: date={st['shake_low_date']} "
-          f"low={st['shake_low']} drop={st['drop_pct']}% vol={st['shake_low_vol']}x")
+    print(f"[10] shakeout_today fires on level touch: date={st['shake_low_date']} "
+          f"low={st['shake_low']} zone=[{st['anchor_high']},{st['breakout_close']}] "
+          f"drop={st['drop_pct']}% vol={st['shake_low_vol']}x")
+
+
+def test_shakeout_not_fired_when_level_not_reached():
+    """A stock that simply FELL (10% off the high) but whose low stayed
+    ABOVE the breakout close must NOT alert -- this is the 2026-09-07
+    DCBBANK/FMGOETZE false-positive class (low still % above the zone).
+    low 134.5 > zone top 132.0, off high 150.0 (drop 10.33%, in 4-25 band)."""
+    df = make_synthetic(seed=6, with_shakeout_pending=True,
+                        shake_low_override=134.5, rally_pad_high=150.0)
+    n = len(df)
+    sh = (n - 20) + 3 + 5
+    df_shake = df.iloc[:sh + 1].copy().reset_index(drop=True)
+    res = check_today_events(df_shake)
+    assert res['shakeout_today'] is None, "low above breakout close = no level touch -> no alert"
+    # the pending candidate still exists: the rejection is due to the LEVEL,
+    # not the volume/drop/window filters
+    assert len(res['pending_breakouts']) >= 1
+    pb = res['pending_breakouts'][0]
+    assert pb['breakout_close'] == 132.0
+    assert 134.5 > pb['breakout_close']
+    print(f"[12] falling stock WITHOUT level touch correctly silent "
+          f"(low 134.5 vs zone top 132.0, off high 150.0)")
+
+
+def test_shakeout_not_fired_when_level_broken():
+    """A crash THROUGH the supply level (low 122.0 = 6.2% below the 130.0
+    anchor, beyond the 2% wick tolerance) is a breakdown, not a shakeout
+    touch -> no alert."""
+    df = make_synthetic(seed=6, with_shakeout_pending=True)  # default low 122.0
+    n = len(df)
+    sh = (n - 20) + 3 + 5
+    df_shake = df.iloc[:sh + 1].copy().reset_index(drop=True)
+    res = check_today_events(df_shake)
+    assert res['shakeout_today'] is None, "low well below the zone = breakdown, not a touch"
+    print(f"[13] breakdown through the level correctly silent "
+          f"(low 122.0 vs zone floor {130.0 * 0.98:.2f})")
 
 
 def test_format_shakeout_alert():
-    df = make_synthetic(seed=6, with_shakeout_pending=True)
+    df = make_synthetic(seed=6, with_shakeout_pending=True, shake_low_override=130.5)
     sh = (len(df) - 20) + 3 + 5
     df_shake = df.iloc[:sh + 1].copy().reset_index(drop=True)
     res = check_today_events(df_shake)
@@ -542,8 +588,10 @@ def test_format_shakeout_alert():
     assert "TESTSTOCK.NS" in msg
     assert "Phase 4b" in msg
     assert "Supply/Anchor: 130.0" in msg
-    assert "Shakeout Low: 122.0" in msg
-    print("[11] format_shakeout_alert produces valid Telegram Markdown message")
+    assert "Shakeout Low: 130.5" in msg
+    assert "Off High 138.0: -5.43%" in msg
+    assert "Level Reached: OB/Breakout 132.0 (low 130.5 in zone 130.0 - 132.0)" in msg
+    print("[11] format_shakeout_alert produces valid Telegram Markdown message (level touch stated truthfully)")
 
 
 if __name__ == "__main__":
@@ -557,5 +605,7 @@ if __name__ == "__main__":
     test_expired_shakeout_excluded()
     test_expired_reversal_window_excluded()
     test_shakeout_today_fires()
+    test_shakeout_not_fired_when_level_not_reached()
+    test_shakeout_not_fired_when_level_broken()
     test_format_shakeout_alert()
-    print("\nAll 11 tests passed.")
+    print("\nAll 13 tests passed.")
