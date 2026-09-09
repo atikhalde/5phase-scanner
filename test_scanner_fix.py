@@ -33,6 +33,13 @@ Tests for the scanner refactor and the pending-breakout lifecycle tightening:
      sample_1291_trades.csv happen within 7 bars of the breakout, and with the
      old `max_i = n - 8` guard those could NEVER alert.
  15. The same young breakout reaches the 30d watchlist.
+ 16. RAJRATAN-class deep wick (2026-09-09): a low 10.6% BELOW the breakout
+     close / ~8% below the anchor, Vol 0.47x, -14.35% off the rally high must
+     alert.  With the old hard-coded 2% wick tolerance it was silently
+     dropped, even though it produced a reversal entry (RAJRATAN.NS,
+     shake low 483.05 on 2026-08-25 -> entry 516.0 on 2026-09-09).
+     (Test 13 keeps the opposite guard: a genuine falling knife -- low ~15%
+     below the anchor -- is still rejected as a breakdown.)
 """
 import sys, os
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
@@ -42,7 +49,7 @@ import numpy as np
 from scanner import (
     prepare_df, scan_5phase, detect_pending_breakouts,
     check_today_events, _check_breakout_confirmed, _is_phase3_breakout_bar,
-    _is_phase4b_shakeout_today,
+    _is_phase4b_shakeout_today, SHAKEOUT_WICK_PCT,
 )
 from telegram_helper import format_shakeout_alert
 
@@ -574,17 +581,48 @@ def test_shakeout_not_fired_when_level_not_reached():
 
 
 def test_shakeout_not_fired_when_level_broken():
-    """A crash THROUGH the supply level (low 122.0 = 6.2% below the 130.0
-    anchor, beyond the 2% wick tolerance) is a breakdown, not a shakeout
-    touch -> no alert."""
-    df = make_synthetic(seed=6, with_shakeout_pending=True)  # default low 122.0
+    """A crash THROUGH the supply level (low 110.0 = 15.4% below the 130.0
+    anchor, beyond the 12% wick tolerance; -20.3% off the 138.0 high so it is
+    still inside the 4-25% drop band) is a breakdown, not a shakeout touch
+    -> no alert.  (The old threshold was a 2% wick = floor 127.4, which also
+    rejected perfectly normal shakeouts -- see test 16.)"""
+    df = make_synthetic(seed=6, with_shakeout_pending=True, shake_low_override=110.0)
     n = len(df)
     sh = (n - 20) + 3 + 5
     df_shake = df.iloc[:sh + 1].copy().reset_index(drop=True)
     res = check_today_events(df_shake)
     assert res['shakeout_today'] is None, "low well below the zone = breakdown, not a touch"
+    assert res['pending_breakouts'], (
+        "test setup broken: rejection must be caused by the LEVEL, not by the "
+        "pending detector dropping the breakout")
     print(f"[13] breakdown through the level correctly silent "
-          f"(low 122.0 vs zone floor {130.0 * 0.98:.2f})")
+          f"(low 110.0 vs zone floor {130.0 * (1 - SHAKEOUT_WICK_PCT / 100.0):.2f})")
+
+
+def test_deep_wick_still_alerts_rajratan_class():
+    """RAJRATAN.NS 2026-08-25 -- the user's own alert.
+
+    Breakout 2026-08-04 close 540.05, rally high 563.95 (2026-08-05), shakeout
+    low 483.05 on 2026-08-25 with Vol 0.47x = -14.35% off the rally high, and
+    the reversal entry fired 2026-09-09 @ 516.0.  The 483.05 low is 10.6%
+    below the breakout close, so it DOES test the level -- but it is ~8% below
+    the anchor, and the old hard-coded 2% wick tolerance threw it away.
+    """
+    df, i = make_rajratan_case()
+    res = check_today_events(df)
+    st = res.get('shakeout_today')
+    assert st is not None, (
+        "RAJRATAN-class deep wick must alert: low 483.05 vs breakout close "
+        "540.05 (level reached, -10.6%), Vol 0.47x, drop 14.35%")
+    assert st['shake_low'] == 483.05
+    assert st['breakout_close'] == 540.05
+    assert st['drop_pct'] == 14.35
+    assert st['shake_low_vol'] < 1.0
+    assert st['status'] == 'shakeout_touch'
+    assert st['anchor_high'] * (1 - SHAKEOUT_WICK_PCT / 100.0) <= st['shake_low']
+    print(f"[16] RAJRATAN-class deep wick alerts: low={st['shake_low']} vs "
+          f"anchor {st['anchor_high']} / breakout close {st['breakout_close']} "
+          f"(-10.6%), drop={st['drop_pct']}%, vol={st['shake_low_vol']}x")
 
 
 def test_format_shakeout_alert():
@@ -603,6 +641,67 @@ def test_format_shakeout_alert():
     assert "Off High 138.0: -5.43%" in msg
     assert "Level Reached: OB/Breakout 132.0 (low 130.5 in zone 130.0 - 132.0)" in msg
     print("[11] format_shakeout_alert produces valid Telegram Markdown message (level touch stated truthfully)")
+
+
+# ---------------------------------------------------------------------------
+# 16: RAJRATAN.NS 2026-08-25 -- real geometry from the user's alert.
+# ---------------------------------------------------------------------------
+def _vol_for_ratio(prev_volumes, ratio):
+    """Volume that yields VolRatio = v / rolling20_mean(v) == ratio."""
+    s19 = float(np.sum(prev_volumes[-19:]))
+    return max(ratio * s19 / (20.0 - ratio), 1.0)
+
+
+def make_rajratan_case():
+    """Rebuild the RAJRATAN.NS chart: flat dry base -> breakout 540.05 ->
+    rally high 563.95 -> 14-bar low-volume decline -> shakeout low 483.05
+    today (Vol 0.47x, -14.35%).
+
+    The 90-180d anchor is not printed in the Telegram alert; Phase 3 forces it
+    below the 540.05 breakout close and the backtest median puts it ~2.5%
+    under it -> 527.0 (a 483.05 low is then 8.3% below the anchor).
+    """
+    n = 320
+    dates = pd.bdate_range('2025-01-01', periods=n)
+    anchor_high, bo_close, rally_high, shake_low = 527.0, 540.05, 563.95, 483.05
+    i = n - 17                       # breakout bar
+    rally = i + 1                    # rally high bar (shake today = rally+15)
+    anchor_idx = i - 140
+
+    base = anchor_high * 0.85
+    close = np.full(n, base)
+    high = np.full(n, base * 1.004)
+    low = np.full(n, base * 0.996)
+    open_ = np.full(n, base)
+    high[anchor_idx] = anchor_high
+    close[anchor_idx] = anchor_high * 0.97
+    high[:i] = np.minimum(high[:i], anchor_high * 0.90)   # anchor stays unique max
+    high[anchor_idx] = anchor_high
+
+    # breakout bar: close > anchor, VolRatio > 1.5, close > EMA50
+    close[i], high[i], low[i], open_[i] = bo_close, 545.0, base * 1.02, base * 1.01
+    # rally bar
+    close[rally], high[rally], low[rally], open_[rally] = 560.0, rally_high, 538.0, 538.0
+    # low-volume-free decline into the shakeout low
+    for k in range(rally + 1, n - 1):
+        f = (k - rally) / (n - 1 - rally)
+        c = 556.0 + (490.0 - 556.0) * f
+        close[k], high[k], low[k], open_[k] = c, c * 1.006, c * 0.99, close[k - 1]
+    low[rally + 1:n - 1] = np.maximum(low[rally + 1:n - 1], 495.0)
+    # today: the shakeout bar
+    close[n - 1], high[n - 1], low[n - 1], open_[n - 1] = 490.0, 495.0, shake_low, 493.0
+
+    vol = np.full(n, 1_000_000.0)
+    vol[::3] = 250_000.0                       # plenty of dry days (Dry90 >= 8)
+    vol[i] = _vol_for_ratio(vol[:i], 3.0)      # breakout volume
+    vol[rally] = _vol_for_ratio(vol[:rally], 1.3)
+    for k in range(rally + 1, n - 1):          # decline: never low volume
+        vol[k] = _vol_for_ratio(vol[:k], 1.2)
+    vol[n - 1] = _vol_for_ratio(vol[:n - 1], 0.47)   # shakeout: Vol 0.47x
+
+    df = pd.DataFrame({'Date': dates, 'Open': open_, 'High': high, 'Low': low,
+                       'Close': close, 'Volume': vol})
+    return df, i
 
 
 # ---------------------------------------------------------------------------
@@ -719,4 +818,5 @@ if __name__ == "__main__":
     test_format_shakeout_alert()
     test_young_breakout_can_fire_shakeout_alert()
     test_young_breakout_reaches_watchlist()
-    print("\nAll 15 tests passed.")
+    test_deep_wick_still_alerts_rajratan_class()
+    print("\nAll 17 tests passed.")

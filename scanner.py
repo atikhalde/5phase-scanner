@@ -41,8 +41,35 @@ now EXCLUDED from the report (expired/failed). The Telegram footer
 it's clear that count is historical (any setup in the 2Y data), not live.
 """
 
+import os
+
 import pandas as pd
 import numpy as np
+
+# ---------------------------------------------------------------------------
+# Phase 4b alert: how far BELOW the supply/OB level today's low may wick and
+# still count as a shakeout touch (stop-hunt) rather than a breakdown.
+#
+# Tuned 2026-09-09 against the 1291-trade backtest (sample_1291_trades.csv):
+# the old hard-coded 2% rejected 42% of the strategy's OWN shakeouts, because
+# real Phase 4b lows routinely pierce the anchor (shake low vs anchor:
+# p25 = -5.2%, p10 = -9.2%).  Coverage of the shakeouts that actually reach
+# the level (low <= breakout_close, 71% of all 1291):
+#
+#     2%  -> 40.7%   (old)
+#     5%  -> 62.7%
+#     8%  -> 80.2%
+#    12%  -> 93.2%   (default)
+#    15%  -> 97.3%
+#
+# 12% is what makes deep-but-genuine setups alert, e.g. RAJRATAN.NS
+# 2026-08-25 (low 483.05 vs breakout close 540.05 = -10.6%, Vol 0.47x,
+# -14.35% off the rally high -> reversal entry 2026-09-09).
+# Override without touching code:  SHAKEOUT_WICK_PCT=8  (percent below the
+# anchor; the zone TOP is unchanged -- a low above the breakout close never
+# alerts, which is the DCBBANK/FMGOETZE false-positive guard).
+# ---------------------------------------------------------------------------
+SHAKEOUT_WICK_PCT = float(os.getenv("SHAKEOUT_WICK_PCT", "12"))
 
 def prepare_df(hist_df):
     df = hist_df.copy().sort_values('Date').reset_index(drop=True)
@@ -476,7 +503,8 @@ def _is_phase3_breakout_bar(df, i, dry_thresh=8, vol_break=1.5):
     }
 
 
-def _is_phase4b_shakeout_today(df, pending_list, today_idx, vol_shake_max=1.0, drop_min=4, drop_max=25, wick_tol=0.02):
+def _is_phase4b_shakeout_today(df, pending_list, today_idx, vol_shake_max=1.0,
+                               drop_min=4, drop_max=25, wick_tol=None):
     """
     Checks if today's bar (today_idx = len(df) - 1) is a Phase 4b shakeout /
     low-volume pullback that TOUCHES the SSL / Supply / Order Block level.
@@ -491,12 +519,16 @@ def _is_phase4b_shakeout_today(df, pending_list, today_idx, vol_shake_max=1.0, d
     5. LEVEL TOUCH (required): today's Low must actually reach the
        supply/OB zone [anchor_high, breakout_close]:
            anchor_high * (1 - wick_tol) <= today_low <= breakout_close
-       A wick up to `wick_tol` (2%) below the anchor is tolerated
-       (stop-hunt wick); deeper = breakdown, not a shakeout. A low that
-       stays above breakout_close has NOT tested the level -> no alert
-       (a mere pullback in a falling stock is not a Phase 4b touch).
+       A stop-hunt wick up to `wick_tol` below the anchor is tolerated
+       (default 12%, env SHAKEOUT_WICK_PCT -- see the notes at the top of
+       this file: the old 2% silently rejected 42% of the strategy's own
+       shakeouts); deeper = breakdown, not a shakeout. A low that stays
+       above breakout_close has NOT tested the level -> no alert (a mere
+       pullback in a falling stock is not a Phase 4b touch).
     6. No Phase 5 reversal has fired yet.
     """
+    if wick_tol is None:
+        wick_tol = SHAKEOUT_WICK_PCT / 100.0
     if not pending_list or today_idx < 1:
         return None
     today_row = df.loc[today_idx]
@@ -568,6 +600,8 @@ def _is_phase4b_shakeout_today(df, pending_list, today_idx, vol_shake_max=1.0, d
             'shake_high': round(float(shake_high), 2),
             'drop_pct': round(float(drop_today), 2),
             'supply_level': anchor_high,
+            'zone_floor': round(float(anchor_high) * (1.0 - wick_tol), 2),
+            'zone_top': float(breakout_close),
             'dry90': bo['dry90'],
             'dry30': bo['dry30'],
             'pending': True,

@@ -64,6 +64,7 @@ from scanner import (  # noqa: E402
     _is_phase4b_shakeout_today,
     _check_breakout_confirmed,
     scan_5phase,
+    SHAKEOUT_WICK_PCT,
 )
 
 REPO = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
@@ -253,8 +254,10 @@ def build_bars(row, seed, variant="clean"):
 # 2. Why did/didn't it fire?  (mirror of _is_phase4b_shakeout_today, with
 #    per-condition bookkeeping -- test/diagnostic code only)
 # ---------------------------------------------------------------------------
-def diagnose(df, pending, today_idx, wick_tol=0.02, drop_min=4, drop_max=25):
+def diagnose(df, pending, today_idx, wick_tol=None, drop_min=4, drop_max=25):
     """Return (fired, reason) replicating _is_phase4b_shakeout_today()."""
+    if wick_tol is None:
+        wick_tol = SHAKEOUT_WICK_PCT / 100.0
     if not pending:
         return False, "no_pending_breakout"
     row = df.loc[today_idx]

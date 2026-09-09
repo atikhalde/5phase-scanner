@@ -55,7 +55,9 @@ def format_shakeout_alert(trade, ticker):
     # Honest level line: the low actually reached the zone (detector-guaranteed)
     try:
         if float(shake_low) < float(anchor_high):
-            level_line = f"Level Reached: wick below anchor {anchor_high} (zone {anchor_high} - {breakout_close})"
+            wick_pct = (float(anchor_high) - float(shake_low)) / float(anchor_high) * 100.0
+            level_line = (f"Level Reached: wick {wick_pct:.1f}% below anchor "
+                          f"{anchor_high} (zone {anchor_high} - {breakout_close})")
         else:
             level_line = f"Level Reached: OB/Breakout {breakout_close} (low {shake_low} in zone {anchor_high} - {breakout_close})"
     except (TypeError, ValueError):

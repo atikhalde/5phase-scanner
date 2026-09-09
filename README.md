@@ -32,49 +32,55 @@ This fixes:
 
 `tools/verify_shakeout_alert.py` replays the alert **bar by bar** over charts
 reconstructed from the real 1291-trade backtest (`sample_1291_trades.csv`, real
-anchor / breakout / rally / shake prices, volumes and bar gaps). Result on a
-300-trade sample:
+anchor / breakout / rally / shake prices, volumes and bar gaps). Recall on a
+300-trade sample (alert fires on the actual Phase 4b shakeout day):
 
-| | before | after |
+| | recall | main rejection reason |
 |---|---|---|
-| alert fires on the real Phase 4b shakeout day | 20.7% | **27.7%** |
-| …rejected because the breakout was invisible to the pending detector | 20.7% | 0.7% |
+| as shipped | 20.7% | 20.7% breakout invisible to the detector |
+| + 8-bar blind-spot fix | 27.7% | 41.7% "breakdown", 29.7% level not reached |
+| + 12% wick tolerance | **64.0%** | 29.7% level not reached (by design) |
 
-Two findings:
+Two bugs found and fixed:
 
-1. **FIXED — 8-bar blind spot.** `detect_pending_breakouts()` stopped at
+1. **8-bar blind spot.** `detect_pending_breakouts()` stopped at
    `max_i = n - 8`, i.e. it refused to look at any breakout younger than 8
-   bars. A fresh breakout could therefore not fire the shakeout alert *and* not
-   reach the 30d/60d watchlist for its first ~11 calendar days. Replaying the
-   backtest, **20.7% of real shakeouts happen within 7 bars of the breakout**
-   (min 2 bars) and could never alert at all. `_check_breakout_confirmed()`
+   bars. A fresh breakout could therefore not fire the shakeout alert *and*
+   not reach the 30d/60d watchlist for its first ~11 calendar days. Replaying
+   the backtest, **20.7% of real shakeouts happen within 7 bars of the
+   breakout** (as few as 2) and could never alert. `_check_breakout_confirmed()`
    already tolerates a partial rally window (`min(i + 8, n)`), so the guard is
-   now `max_i = n - 1`. Regression tests: `test_young_breakout_*` in
-   `test_scanner_fix.py` (they fail against the old guard).
-2. **BY DESIGN — the level-touch filter is much stricter than the backtest.**
-   The alert demands `anchor_high * 0.98 <= low <= breakout_close`; the
-   backtest's Phase 4b has no such condition. Across all 1291 backtest
-   shakeouts: 29.0% satisfy it, **28.9% never reach the breakout close**
-   (correctly silent — no level test) and **42.1% pierce more than 2% below the
-   anchor** and are discarded as "breakdowns" — although real Phase 4b shakeouts
-   routinely do exactly that (shake low vs anchor: p25 = −5.2%, p10 = −9.2%).
-   Coverage vs the wick tolerance: 2% → 29.0% (current), 3% → 33.9%,
-   5% → 44.6%, 8% → 57.0%, 10% → 62.7%.
+   now `max_i = n - 1`. Regression tests: `test_young_breakout_*`.
+2. **Wick tolerance was 2%, far too tight for this strategy.** The alert demands
+   `anchor_high * (1 - wick) <= low <= breakout_close`. The old 2% discarded
+   **42% of the strategy's own shakeouts** as "breakdowns", although real
+   Phase 4b lows routinely pierce the anchor (low vs anchor: p25 = −5.2%,
+   p10 = −9.2%). Real example that was silently dropped: **RAJRATAN.NS
+   2026-08-25** — low 483.05 vs breakout close 540.05 (−10.6%, Vol 0.47x,
+   −14.35% off the rally high) — which went on to fire a reversal entry at
+   516.0 on 2026-09-09. Default is now **12%** (`SHAKEOUT_WICK_PCT`), which
+   keeps 93% of the shakeouts that actually reach the level:
+
+   | wick | 2% (old) | 5% | 8% | 10% | **12%** | 15% |
+   |---|---|---|---|---|---|---|
+   | backtest shakeouts alerted | 29.0% | 44.6% | 57.0% | 62.7% | **66.3%** | 69.2% |
+   | …of those that touch the level | 40.7% | 62.7% | 80.2% | 88.1% | **93.2%** | 97.3% |
+
+   Tune it per environment without touching code:
+   `SHAKEOUT_WICK_PCT=8` (percent below the anchor). The zone **top** is
+   unchanged — a low that stays above the breakout close never alerts, which
+   is the DCBBANK/FMGOETZE false-positive guard; that is the remaining 29.7%
+   of misses and it is intentional.
 
 ```bash
 python tools/verify_shakeout_alert.py --limit 300                  # backtest geometry
 python tools/verify_shakeout_alert.py --mode bars --bars-dir data  # real OHLCV CSVs
 ```
 
-> ⚠️ Known ops issue: `daily_scanner.yml` runs every 15 minutes and there is no
-> de-duplication across runs, so a breakout/shakeout/reversal alert that fires
-> on today's bar is re-sent on **every** run that day (up to ~25 copies), and
+> ⚠️ Known ops issue (left as-is by request): `daily_scanner.yml` runs every
+> 15 minutes with no de-duplication across runs, so an alert that fires on
+> today's bar is re-sent on **every** run that day (up to ~25 copies), and
 > during market hours it can fire off a *partial* intraday bar.
-
-**Setup Secrets:**
-1. Create bot via @BotFather, get token
-2. Get chat ID: send message to bot, then `https://api.telegram.org/bot<TOKEN>/getUpdates`
-3. In GitHub repo → Settings → Secrets and variables → Actions → New repository secret → add `TELEGRAM_BOT_TOKEN` and `TELEGRAM_CHAT_ID`
 
 ### 2. Full NSE EQ Scanner (`full_scanner.py`) — NEW
 > ⚙️ **Activate the workflow:** the CI file is provided at `workflow_templates/full_scanner.yml`. Copy it to `.github/workflows/full_scanner.yml` and commit (this must be done by a user/token with the GitHub `workflows` permission — the automated agent cannot create workflow files). Once committed it runs on the schedule below. You can also just run `python full_scanner.py` anytime.
