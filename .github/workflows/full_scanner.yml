@@ -14,9 +14,20 @@ on:
   workflow_dispatch:  # allow manual trigger
 
 # Independent of the Nifty500 scan so the two never cancel each other.
+#
+# IMPORTANT: do NOT set `cancel-in-progress: true` here. A full ~2000-symbol
+# scan takes ~25-30 min (vs the ~7-min Nifty500 scan). If a new dispatch arrives
+# before the running one finishes, `cancel-in-progress: true` kills the running
+# scan right at the ~15-min mark and it NEVER completes — which is exactly what
+# happened on 2026-09-09 (every "Full NSE EQ" run was cancelled at 15m27s).
+# With `cancel-in-progress: false`, new runs QUEUE until the running one
+# finishes, so the scan is allowed to finish and send its report.
+#
+# Trigger this ONCE per trading day — it is scheduled at 10:15 UTC (15:45 IST
+# EOD). Do NOT dispatch it every 15 minutes.
 concurrency:
   group: full-eq-scan
-  cancel-in-progress: true
+  cancel-in-progress: false
 
 jobs:
   scan:
