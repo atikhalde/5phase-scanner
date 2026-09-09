@@ -22,6 +22,17 @@ Tests for the scanner refactor and the pending-breakout lifecycle tightening:
      indefinitely as a stale "waiting" entry).
   9. ABDL-type filter (second half): valid shakeout observed but the 15-bar
      REVERSAL window closed without a bullish reversal -> EXCLUDED too.
+ 10. shakeout_today fires when the low-volume pullback reaches the supply/OB
+     zone.
+ 11. format_shakeout_alert renders a truthful Telegram message.
+ 12. no alert for a falling stock that never reached the level.
+ 13. no alert for a crash through the level (breakdown, not a shakeout).
+ 14. YOUNG BREAKOUT (2026-09-09 regression): a breakout less than 8 bars old
+     must still be visible to detect_pending_breakouts() and must be able to
+     fire the Phase 4b alert.  20.7% of real shakeouts in
+     sample_1291_trades.csv happen within 7 bars of the breakout, and with the
+     old `max_i = n - 8` guard those could NEVER alert.
+ 15. The same young breakout reaches the 30d watchlist.
 """
 import sys, os
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
@@ -594,6 +605,104 @@ def test_format_shakeout_alert():
     print("[11] format_shakeout_alert produces valid Telegram Markdown message (level touch stated truthfully)")
 
 
+# ---------------------------------------------------------------------------
+# 14 + 15: YOUNG BREAKOUT regression (2026-09-09).
+#
+# detect_pending_breakouts() used to stop at `max_i = n - 8`, so any breakout
+# younger than 8 bars was invisible: no Phase 4b shakeout alert and no
+# watchlist entry until the breakout was ~11 calendar days old.  Replaying the
+# 1291-trade backtest shows 20.7% of real Phase 4b shakeouts occur within 7
+# bars of the breakout, i.e. they could never alert at all.
+# ---------------------------------------------------------------------------
+def make_young_breakout(bars_after_breakout=5, seed=6):
+    """Breakout `bars_after_breakout` bars before the end of the data, with a
+    Phase 4b low-volume pullback into the supply/OB zone ON THE LAST BAR.
+
+    Geometry: anchor 130.0 -> breakout close 132.0 -> rally high 140.0 ->
+    today's low 131.5 (inside the zone [127.4, 132.0], drop (140-131.5)/140
+    = 6.07%, today's VolRatio ~0.2x).
+    """
+    df = make_synthetic(seed=seed)          # plain random-walk base (dry days)
+    n = len(df)
+    i = n - 1 - bars_after_breakout          # breakout bar
+    anchor_idx = i - 140
+    # keep every pre-breakout bar below the carved anchor
+    df.loc[df.index < i, 'High'] = df.loc[df.index < i, 'High'].clip(upper=128.0)
+    df.loc[df.index < i, 'Close'] = df.loc[df.index < i, 'Close'].clip(upper=127.0)
+    df.loc[anchor_idx, 'High'] = 130.0
+
+    df.loc[i, 'Open'] = 120.0
+    df.loc[i, 'High'] = 132.5               # < rally_high / 1.01 = 138.6
+    df.loc[i, 'Low'] = 119.0
+    df.loc[i, 'Close'] = 132.0
+    df.loc[i, 'Volume'] = 3_000_000
+    # rally bar (Phase 4a) immediately after the breakout
+    df.loc[i + 1, 'Open'] = 132.5
+    df.loc[i + 1, 'High'] = 140.0
+    df.loc[i + 1, 'Low'] = 132.0
+    df.loc[i + 1, 'Close'] = 139.0
+    df.loc[i + 1, 'Volume'] = 1_500_000
+    # low-volume decline into the level; lows stay above today's low
+    for k in range(i + 2, n - 1):
+        df.loc[k, 'Open'] = 135.2
+        df.loc[k, 'High'] = 136.0
+        df.loc[k, 'Low'] = 133.5
+        df.loc[k, 'Close'] = 135.0
+        df.loc[k, 'Volume'] = 1_200_000
+    # TODAY: low-volume pullback that reaches the zone
+    df.loc[n - 1, 'Open'] = 134.0
+    df.loc[n - 1, 'High'] = 134.5
+    df.loc[n - 1, 'Low'] = 131.5
+    df.loc[n - 1, 'Close'] = 133.0
+    df.loc[n - 1, 'Volume'] = 200_000
+    return df, i
+
+
+def test_young_breakout_can_fire_shakeout_alert():
+    """A breakout only 5 bars old must still fire the Phase 4b alert."""
+    df, i = make_young_breakout(bars_after_breakout=5)
+    dfp = prepare_df(df)
+    assert len(dfp) - 1 - i <= 8, "breakout must be younger than 8 bars"
+    # the raw Phase 1->4a setup has to be real, otherwise the test proves
+    # nothing about the pending detector
+    assert _check_breakout_confirmed(dfp, i, len(dfp)) is not None, (
+        "test setup broken: Phase 1->4a not confirmed on the carved breakout")
+
+    pending = detect_pending_breakouts(dfp, lookback_days=120)
+    assert pending, (
+        "detect_pending_breakouts() is blind to breakouts younger than 8 bars "
+        "-- this is the 2026-09-09 bug (old `max_i = n - 8` guard)")
+    assert any(str(p['breakout_date']) == str(df.loc[i, 'Date'])
+               for p in pending), "the young breakout is missing from pending"
+
+    res = check_today_events(df)
+    st = res.get('shakeout_today')
+    assert st is not None, "Phase 4b alert must fire for a 5-bar-old breakout"
+    assert st['shake_low'] == 131.5
+    assert st['anchor_high'] == 130.0
+    assert st['drop_pct'] == 6.07
+    assert st['shake_low_vol'] < 1.0
+    assert st['status'] == 'shakeout_touch'
+    print(f"[14] young breakout (5 bars old) fires the alert: "
+          f"low={st['shake_low']} zone=[{st['anchor_high']},"
+          f"{st['breakout_close']}] drop={st['drop_pct']}% "
+          f"vol={st['shake_low_vol']}x")
+
+
+def test_young_breakout_reaches_watchlist():
+    """The same young breakout must reach the 30-day watchlist."""
+    df, i = make_young_breakout(bars_after_breakout=5)
+    res = check_today_events(df)
+    assert res['watchlist_30'], (
+        "a 5-bar-old breakout must appear in the 30d watchlist "
+        "(it used to be invisible for its first 8 bars)")
+    assert any(str(w['breakout_date']) == str(df.loc[i, 'Date'])
+               for w in res['watchlist_30'])
+    print(f"[15] young breakout reaches the 30d watchlist "
+          f"({len(res['watchlist_30'])} candidate(s))")
+
+
+
 if __name__ == "__main__":
     test_scan_5phase_unchanged()
     test_pending_breakout_detected()
@@ -608,4 +717,6 @@ if __name__ == "__main__":
     test_shakeout_not_fired_when_level_not_reached()
     test_shakeout_not_fired_when_level_broken()
     test_format_shakeout_alert()
-    print("\nAll 13 tests passed.")
+    test_young_breakout_can_fire_shakeout_alert()
+    test_young_breakout_reaches_watchlist()
+    print("\nAll 15 tests passed.")

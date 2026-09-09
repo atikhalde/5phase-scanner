@@ -297,8 +297,17 @@ def detect_pending_breakouts(df, lookback_days=60, vol_shake_max=1.0,
             pass
 
     # Earliest breakout bar we can still see full rally confirmation for:
-    # need up to 7 future bars after i, so don't start from the last 7.
-    max_i = n - 8
+    # FIX (2026-09-09): this used to be `n - 8`, i.e. the detector refused to
+    # look at any breakout younger than 8 bars.  A breakout is invisible to
+    # detect_pending_breakouts() -- and therefore to the Phase 4b shakeout
+    # alert AND to the 30d/60d watchlist -- for its first 7 bars.  Replaying
+    # the 1291-trade backtest (tools/verify_shakeout_alert.py) shows 20.7% of
+    # real Phase 4b shakeouts happen within 7 bars of the breakout, so those
+    # could never alert at all.
+    # _check_breakout_confirmed() already tolerates a PARTIAL rally window
+    # (it uses min(i + 8, n)), so we only need one bar after `i` for a
+    # non-empty rally window -> max_i = n - 1.
+    max_i = n - 1
 
     pending = []
     i = 180

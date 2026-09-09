@@ -28,6 +28,49 @@ This fixes:
   - Reversal Entry Today: Phase5 entry today
 - **Telegram:** Requires GitHub Secrets `TELEGRAM_BOT_TOKEN` and `TELEGRAM_CHAT_ID`
 
+### Shakeout / Pullback alert — verified status (2026-09-09)
+
+`tools/verify_shakeout_alert.py` replays the alert **bar by bar** over charts
+reconstructed from the real 1291-trade backtest (`sample_1291_trades.csv`, real
+anchor / breakout / rally / shake prices, volumes and bar gaps). Result on a
+300-trade sample:
+
+| | before | after |
+|---|---|---|
+| alert fires on the real Phase 4b shakeout day | 20.7% | **27.7%** |
+| …rejected because the breakout was invisible to the pending detector | 20.7% | 0.7% |
+
+Two findings:
+
+1. **FIXED — 8-bar blind spot.** `detect_pending_breakouts()` stopped at
+   `max_i = n - 8`, i.e. it refused to look at any breakout younger than 8
+   bars. A fresh breakout could therefore not fire the shakeout alert *and* not
+   reach the 30d/60d watchlist for its first ~11 calendar days. Replaying the
+   backtest, **20.7% of real shakeouts happen within 7 bars of the breakout**
+   (min 2 bars) and could never alert at all. `_check_breakout_confirmed()`
+   already tolerates a partial rally window (`min(i + 8, n)`), so the guard is
+   now `max_i = n - 1`. Regression tests: `test_young_breakout_*` in
+   `test_scanner_fix.py` (they fail against the old guard).
+2. **BY DESIGN — the level-touch filter is much stricter than the backtest.**
+   The alert demands `anchor_high * 0.98 <= low <= breakout_close`; the
+   backtest's Phase 4b has no such condition. Across all 1291 backtest
+   shakeouts: 29.0% satisfy it, **28.9% never reach the breakout close**
+   (correctly silent — no level test) and **42.1% pierce more than 2% below the
+   anchor** and are discarded as "breakdowns" — although real Phase 4b shakeouts
+   routinely do exactly that (shake low vs anchor: p25 = −5.2%, p10 = −9.2%).
+   Coverage vs the wick tolerance: 2% → 29.0% (current), 3% → 33.9%,
+   5% → 44.6%, 8% → 57.0%, 10% → 62.7%.
+
+```bash
+python tools/verify_shakeout_alert.py --limit 300                  # backtest geometry
+python tools/verify_shakeout_alert.py --mode bars --bars-dir data  # real OHLCV CSVs
+```
+
+> ⚠️ Known ops issue: `daily_scanner.yml` runs every 15 minutes and there is no
+> de-duplication across runs, so a breakout/shakeout/reversal alert that fires
+> on today's bar is re-sent on **every** run that day (up to ~25 copies), and
+> during market hours it can fire off a *partial* intraday bar.
+
 **Setup Secrets:**
 1. Create bot via @BotFather, get token
 2. Get chat ID: send message to bot, then `https://api.telegram.org/bot<TOKEN>/getUpdates`
