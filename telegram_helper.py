@@ -86,6 +86,58 @@ def format_reversal_alert(trade, ticker):
         f"SL: {round(trade['shake_low']*0.97,2)} | Dry90: {trade['dry90']}"
     )
 
+def format_shake_green_alert(trade, ticker):
+    """ADD-ON (2026-09-25): Phase 4b shake low formed on the PREVIOUS bar and
+    the very next session printed a GREEN candle (Close > Open).
+
+    This is the softer / earlier trigger: it does NOT require the strict
+    Phase 5 conditions (close above the shake bar's high, VolRatio > 0.6 and
+    rising), so it can fire on bars the REVERSAL ENTRY alert rejects -- e.g.
+    ALEMBICLTD.NS shake low 2026-09-16 -> green candle 2026-09-17.
+    """
+    def d(v):
+        return v.strftime('%Y-%m-%d') if hasattr(v, 'strftime') else str(v)
+
+    breakout_date = d(trade.get('breakout_date'))
+    rally_date = d(trade.get('rally_high_date'))
+    shake_date = d(trade.get('shake_low_date'))
+    green_date = d(trade.get('green_date'))
+
+    anchor_high = trade.get('anchor_high', '')
+    breakout_close = trade.get('breakout_close', '')
+    rally_high = trade.get('rally_high', '')
+    shake_low = trade.get('shake_low', '')
+    shake_low_vol = trade.get('shake_low_vol', '')
+    shake_high = trade.get('shake_high', '')
+    drop_pct = trade.get('drop_pct', '')
+    green_open = trade.get('green_open', '')
+    green_close = trade.get('green_close', '')
+    green_vol = trade.get('green_vol', '')
+    dry90 = trade.get('dry90', '')
+
+    try:
+        chg = (float(green_close) - float(green_open)) / float(green_open) * 100.0
+        body_pct = f" (+{chg:.2f}% intraday O→C)"
+    except (TypeError, ValueError, ZeroDivisionError):
+        body_pct = ""
+
+    try:
+        sl_ref = round(float(shake_low) * 0.97, 2)
+    except (TypeError, ValueError):
+        sl_ref = '-'
+
+    return (
+        f"🟢 *SHAKE-LOW → GREEN NEXT DAY* `{ticker}`\n"
+        f"📍 *Shake low made on the previous session, next session closed GREEN*\n"
+        f"Breakout: {breakout_close} on {breakout_date} Vol {trade.get('vol_break','')}x\n"
+        f"Rally High: {rally_high} on {rally_date}\n"
+        f"Shake Low: {shake_low} on {shake_date} Vol {shake_low_vol}x\n"
+        f"Off High {shake_high}: -{drop_pct}% (Phase 4b shakeout)\n"
+        f"GREEN candle: {green_date} O {green_open} → C {green_close}{body_pct}"
+        f" Vol {green_vol}x\n"
+        f"Supply/Anchor: {anchor_high} | SL ref: {sl_ref} | Dry90: {dry90}"
+    )
+
 def format_watchlist(watchlist, tickers_with_trades):
     if not watchlist:
         return "📋 *Daily Watchlist*: No recent breakouts in last 30 days waiting reversal (verified, then checked 60d - also none)"
