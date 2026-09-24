@@ -384,6 +384,159 @@ def detect_pending_breakouts(df, lookback_days=60, vol_shake_max=1.0,
     return pending
 
 
+# ---------------------------------------------------------------------------
+# ADD-ON ALERT (2026-09-25): "SHAKE LOW -> NEXT-DAY GREEN CANDLE"
+#
+# Purely ADDITIVE: nothing above is modified and no existing result changes.
+#
+# Requirement (user spec): whenever a stock makes a Phase 4b SHAKE LOW and the
+# VERY NEXT trading day prints a GREEN candle, alert on that next day.
+#   example: ALEMBICLTD.NS -> shake low 2026-09-16, green candle 2026-09-17
+#            -> alert dated 2026-09-17.
+#
+# Rules actually implemented (confirmed with the user):
+#   1. "Shake low" = the SAME Phase 4b shake low the engine already uses
+#      (lowest Low among VolRatio < 1.0 bars in rally_idx+1 .. rally_idx+15,
+#      with a 4-25% drop from the shake high) -- i.e. exactly the "Shake 97.4
+#      (17.26%)" number the watchlist prints.  Computed by the shared
+#      _find_shakeout() helper so it can never drift from the core logic.
+#   2. "Next day" = the immediately following BAR (next trading session), and
+#      ONLY that bar -- a green candle 2+ days later does NOT alert.
+#   3. "Green candle" = Close > Open (the same bullish-bar test Phase 5 uses).
+#   4. Fires independently of the strict Phase 5 reversal: if the strict
+#      REVERSAL ENTRY alert also fires on that same bar, BOTH are sent.
+#
+# Why this scans breakout bars itself instead of reusing the pending list:
+# detect_pending_breakouts() deliberately DROPS a breakout as soon as a strict
+# Phase 5 reversal bar is observed, and scan_5phase() cannot see breakouts in
+# the last 20 bars (`while i < n - 20`).  A shake low dated yesterday with a
+# reversal bar today therefore exists in NEITHER list -- exactly the "fire
+# both" case the user asked for.  So we re-derive candidates from
+# _check_breakout_confirmed + _find_shakeout (identical helpers, identical
+# constants) over a narrow, cheap index range.
+# ---------------------------------------------------------------------------
+
+# Window constants mirror Phase 4a / 4b exactly (do not change without also
+# changing _check_breakout_confirmed / _find_shakeout).
+RALLY_WINDOW_BARS = 7    # Phase 4a: rally high lives in i+1 .. i+7
+SHAKE_WINDOW_BARS = 15   # Phase 4b: shake low lives in rally_idx+1 .. rally_idx+15
+
+
+def _build_shakelow_green_record(df, bo, shake, today_idx):
+    """Compose the alert record for one shake-low -> next-day-green event."""
+    low_row = shake['low_row']
+    row = df.loc[today_idx]
+    green_vol = row.get('VolRatio')
+    return {
+        'anchor_date': bo['anchor_date'],
+        'anchor_high': bo['anchor_high'],
+        'days_since': bo['days_since'],
+        'breakout_date': bo['breakout_date'],
+        'breakout_high': bo['breakout_high'],
+        'breakout_close': bo['breakout_close'],
+        'vol_break': bo['vol_break'],
+        'rally_high_date': bo['rally_high_date'],
+        'rally_high': bo['rally_high'],
+        # Phase 4b (the shake low that was made on the PREVIOUS bar)
+        'shake_low_date': low_row['Date'],
+        'shake_low': round(float(shake['shake_low']), 2),
+        'shake_low_vol': round(float(low_row['VolRatio']), 2),
+        'shake_high': round(float(shake['shake_high']), 2),
+        'drop_pct': round(float(shake['drop']), 2),
+        # The GREEN confirmation bar (today / latest bar)
+        'green_date': row['Date'],
+        'green_open': round(float(row['Open']), 2),
+        'green_close': round(float(row['Close']), 2),
+        'green_vol': round(float(green_vol), 2) if not pd.isna(green_vol) else None,
+        # Phase 5 is deliberately NOT evaluated here -- this alert is the
+        # softer, earlier trigger and fires whether or not Phase 5 qualifies.
+        'reversal_date': None,
+        'entry': None,
+        'entry_vol': None,
+        'dry90': bo['dry90'],
+        'dry30': bo['dry30'],
+        'pending': True,
+        'status': 'shake_low_green_next_day',
+    }
+
+
+def detect_shakelow_green_next_day(df, today_idx=None, lookback_days=60,
+                                   vol_shake_max=1.0, drop_min=4, drop_max=25):
+    """Return a list of "shake low yesterday -> GREEN candle today" records.
+
+    `today_idx` defaults to the last bar of `df` (the live/latest session).
+    The list is normally empty or has a single element (one alert per
+    shake-low bar).  Returns [] when today's candle is not green, when the
+    current shake low is not the immediately preceding bar, or when no valid
+    4-25% Phase 4b shakeout exists.
+    """
+    if len(df) < 250:
+        return []
+    df = prepare_df(df)
+    n = len(df)
+    if today_idx is None:
+        today_idx = n - 1
+    today_idx = int(today_idx)
+    if today_idx < 2 or today_idx > n - 1:
+        return []
+
+    # RULE 3 (gate): the confirmation bar must be GREEN (Close > Open).
+    today_row = df.loc[today_idx]
+    if pd.isna(today_row['Open']) or pd.isna(today_row['Close']):
+        return []
+    if not float(today_row['Close']) > float(today_row['Open']):
+        return []
+
+    prev_idx = today_idx - 1   # RULE 2: the shake low must be THIS bar
+
+    # Fast gate: by definition the Phase 4b shake low is always a LOW-volume
+    # bar (VolRatio < 1.0), so if the previous bar is not low-volume it can
+    # never be the shake low -- skip the whole breakout scan.  This is exact,
+    # not a heuristic, and makes the add-on ~free for the 99% of symbols that
+    # are not sitting on a fresh shake low.
+    prev_vol = df.loc[prev_idx, 'VolRatio']
+    if pd.isna(prev_vol) or float(prev_vol) >= vol_shake_max:
+        return []
+
+    last_date = pd.to_datetime(df.iloc[-1]['Date'])
+    cutoff = last_date - pd.Timedelta(days=lookback_days)
+
+    # Cheap candidate range.  The shake low must sit at prev_idx, so with the
+    # 4a/4b windows above the breakout bar can only live in
+    # [prev_idx - (SHAKE_WINDOW_BARS + RALLY_WINDOW_BARS), prev_idx - 2].
+    # We scan a generous +-margin around that (correctness comes from the
+    # shared helpers below, this range is only a speed optimisation).
+    lo = max(180, prev_idx - (SHAKE_WINDOW_BARS + RALLY_WINDOW_BARS) - 20)
+    hi = min(prev_idx - 2, n - 8)
+
+    alerts = []
+    seen_low_idx = set()
+    i = lo
+    while i <= hi:
+        bdate = pd.to_datetime(df.loc[i, 'Date'])
+        if bdate < cutoff:
+            i += 1
+            continue
+        bo = _check_breakout_confirmed(df, i, n)
+        if bo is None:
+            i += 1
+            continue
+        rally_idx = bo['rally_idx']
+        # Phase 4b -- identical computation to scan_5phase / pending detector.
+        shake = _find_shakeout(df, i, rally_idx, n,
+                               vol_shake_max=vol_shake_max,
+                               drop_min=drop_min, drop_max=drop_max)
+        if shake['valid']:
+            low_idx = int(shake['low_idx'])
+            if low_idx == prev_idx and low_idx not in seen_low_idx:
+                seen_low_idx.add(low_idx)
+                alerts.append(_build_shakelow_green_record(df, bo, shake, today_idx))
+        # Same skip-ahead as detect_pending_breakouts: never report the same
+        # breakout twice from a nearby bar.
+        i = rally_idx + 1
+    return alerts
+
+
 def get_watchlist(trades, today, days=30, only_waiting=True):
     """
     Watchlist logic:
@@ -572,7 +725,8 @@ def check_today_events(df):
     if len(df) < 250:
         return {'breakout_today': None, 'shakeout_today': None, 'watchlist': [],
                 'reversal_today': None, 'all_trades': [], 'watchlist_30': [],
-                'watchlist_60': [], 'pending_breakouts': []}
+                'watchlist_60': [], 'pending_breakouts': [],
+                'shake_green_today': []}
     df_prep = prepare_df(df)
     trades = scan_5phase(df_prep)
     today = df_prep.iloc[-1]['Date'].date()
@@ -601,6 +755,11 @@ def check_today_events(df):
     # Phase 4b low-volume pullback / shakeout touching SSL / Supply / Order Block today
     shakeout_today = _is_phase4b_shakeout_today(df_prep, pending, len(df_prep) - 1)
 
+    # ADD-ON (2026-09-25): shake low on the PREVIOUS bar + GREEN candle on the
+    # latest bar.  Purely additive -- evaluated independently of the strict
+    # Phase 5 reversal above, so both can fire on the same bar.
+    shake_green_today = detect_shakelow_green_next_day(df_prep, len(df_prep) - 1)
+
     # Watchlist 30/60 days waiting: combine completed (reversal future --
     # normally empty on live data by construction) with pending breakouts.
     waiting_pool = list(trades) + list(pending)
@@ -619,4 +778,5 @@ def check_today_events(df):
         'watchlist_60': watchlist_60,
         'all_trades': trades,
         'pending_breakouts': pending,
+        'shake_green_today': shake_green_today,
     }

@@ -57,6 +57,7 @@ from telegram_helper import (
     format_breakout_alert,
     format_shakeout_alert,
     format_reversal_alert,
+    format_shake_green_alert,
     format_watchlist,
     format_recent_reversals_fired,
 )
@@ -184,6 +185,9 @@ def run_full_scan():
     breakout_today = []
     shakeout_today = []
     reversal_today = []
+    # ADD-ON (2026-09-25): Phase 4b shake low on the previous bar + GREEN
+    # candle on the latest bar (fires independently of the strict reversal).
+    shake_green_today = []
     watchlist_all = []
     watchlist_30 = []
     watchlist_60 = []
@@ -230,6 +234,9 @@ def run_full_scan():
                 tr = result['reversal_today']
                 tr['ticker'] = f"{sym}.NS"
                 reversal_today.append(tr)
+            for g in result.get('shake_green_today', []):
+                g['ticker'] = f"{sym}.NS"
+                shake_green_today.append(g)
             for w in result['watchlist']:
                 w['ticker'] = f"{sym}.NS"
                 watchlist_all.append(w)
@@ -243,6 +250,7 @@ def run_full_scan():
                 print(f"[{idx}] {sym}.NS B/O today:{len(breakout_today)} "
                       f"Shake today:{len(shakeout_today)} "
                       f"Rev today:{len(reversal_today)} "
+                      f"ShakeGreen:{len(shake_green_today)} "
                       f"Watch30:{len(watchlist_30)} Watch60:{len(watchlist_60)}")
             time.sleep(0.15)
         except Exception as e:
@@ -262,6 +270,7 @@ def run_full_scan():
     breakout_today = dedup(breakout_today)
     shakeout_today = dedup(shakeout_today)
     reversal_today = dedup(reversal_today)
+    shake_green_today = dedup(shake_green_today)
 
     final_watchlist = watchlist_30
     window_used = 30
@@ -311,6 +320,7 @@ def run_full_scan():
         pd.DataFrame(breakout_today).to_csv(f"full_breakouts_today_{today_str}.csv", index=False)
         pd.DataFrame(shakeout_today).to_csv(f"full_shakeouts_today_{today_str}.csv", index=False)
         pd.DataFrame(reversal_today).to_csv(f"full_reversals_today_{today_str}.csv", index=False)
+        pd.DataFrame(shake_green_today).to_csv(f"full_shake_green_today_{today_str}.csv", index=False)
         pd.DataFrame(final_watchlist).to_csv(f"full_daily_watchlist_{today_str}.csv", index=False)
         print("Full scan done (coverage guard - no live data)")
         return
@@ -381,11 +391,22 @@ def run_full_scan():
     else:
         print(f"✅ No reversal entries today {today_str}")
 
+    # ADD-ON alert: shake low on the previous bar -> GREEN candle on the
+    # latest bar.  Sent independently of the strict reversal alert above.
+    if shake_green_today:
+        for tr in shake_green_today:
+            msg = format_shake_green_alert(tr, tr['ticker'])
+            print(msg)
+            send_telegram_message(bot_token, chat_id, msg)
+    else:
+        print(f"🟢 No shake-low → next-day-green setups today {today_str}")
+
     pd.DataFrame(final_watchlist).to_csv(f"full_daily_watchlist_{today_str}.csv", index=False)
     pd.DataFrame(recent_reversals_fired).to_csv(f"full_recent_reversals_fired_{today_str}.csv", index=False)
     pd.DataFrame(breakout_today).to_csv(f"full_breakouts_today_{today_str}.csv", index=False)
     pd.DataFrame(shakeout_today).to_csv(f"full_shakeouts_today_{today_str}.csv", index=False)
     pd.DataFrame(reversal_today).to_csv(f"full_reversals_today_{today_str}.csv", index=False)
+    pd.DataFrame(shake_green_today).to_csv(f"full_shake_green_today_{today_str}.csv", index=False)
     print("Full scan done")
 
 

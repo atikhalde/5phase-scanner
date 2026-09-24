@@ -68,5 +68,6 @@ jobs:
             full_breakouts_today_*.csv
             full_shakeouts_today_*.csv
             full_reversals_today_*.csv
+            full_shake_green_today_*.csv
             full_recent_reversals_fired_*.csv
           if-no-files-found: ignore
