@@ -5,29 +5,33 @@ name: Full NSE EQ 5-Phase Scanner (Telegram Alerts)
 # universe catches stocks outside Nifty500 (e.g. TVSSRICHAK).
 #
 # A ~2000-symbol scan takes far longer than the 15-min Nifty500 cadence, so this
-# runs ONCE per trading day at EOD (plus manual dispatch), not intraday.
+# runs ONCE per trading day after the daily EOD scan has finished (plus manual
+# dispatch), not intraday.
 
 on:
   schedule:
-    # EOD once per trading day: 15:45 IST = 10:15 UTC, Mon-Fri.
-    - cron: '15 10 * * 1-5'
+    # EOD once per trading day: 17:00 IST = 11:30 UTC, Mon-Fri. This is after
+    # the 15:45 IST daily EOD scan so the shared alert registry is up to date.
+    - cron: '30 11 * * 1-5'
   workflow_dispatch:  # allow manual trigger
+    inputs:
+      force:
+        description: 'Run even if a full scan already succeeded today'
+        type: boolean
+        default: false
 
 # Independent of the Nifty500 scan so the two never cancel each other.
-#
 # IMPORTANT: do NOT set `cancel-in-progress: true` here. A full ~2000-symbol
-# scan takes ~25-30 min (vs the ~7-min Nifty500 scan). If a new dispatch arrives
-# before the running one finishes, `cancel-in-progress: true` kills the running
-# scan right at the ~15-min mark and it NEVER completes — which is exactly what
-# happened on 2026-09-09 (every "Full NSE EQ" run was cancelled at 15m27s).
-# With `cancel-in-progress: false`, new runs QUEUE until the running one
-# finishes, so the scan is allowed to finish and send its report.
-#
-# Trigger this ONCE per trading day — it is scheduled at 10:15 UTC (15:45 IST
-# EOD). Do NOT dispatch it every 15 minutes.
+# scan takes ~25-40 min. If a new dispatch arrives before the running one
+# finishes, `cancel-in-progress: true` kills the running scan. With false, new
+# runs QUEUE; the duplicate gate below skips redundant triggers entirely.
 concurrency:
   group: full-eq-scan
   cancel-in-progress: false
+
+permissions:
+  contents: read
+  actions: read   # needed to check for an already-successful run today
 
 jobs:
   scan:
@@ -47,19 +51,79 @@ jobs:
           pip install --upgrade pip
           pip install -r requirements.txt
 
+      - name: Compute IST session context
+        id: ctx
+        run: |
+          python3 - <<'PY' >> "$GITHUB_OUTPUT"
+          from datetime import datetime, time, timedelta, timezone
+          from zoneinfo import ZoneInfo
+
+          now = datetime.now(ZoneInfo('Asia/Kolkata'))
+          day_start = datetime.combine(now.date(), time(0), ZoneInfo('Asia/Kolkata')).astimezone(timezone.utc)
+          day_end = (day_start.astimezone(ZoneInfo('Asia/Kolkata')) + timedelta(days=1)).astimezone(timezone.utc)
+          minutes = now.hour * 60 + now.minute
+          in_market = now.weekday() < 5 and 9 * 60 <= minutes <= 20 * 60
+          print(f"ist_date={now.date().isoformat()}")
+          print(f"day_start={day_start.strftime('%Y-%m-%dT%H:%M:%SZ')}")
+          print(f"day_end={day_end.strftime('%Y-%m-%dT%H:%M:%SZ')}")
+          print(f"in_market={'true' if in_market else 'false'}")
+          print("force=${{ github.event.inputs.force || 'false' }}")
+          PY
+
+      - name: Skip delayed scheduled runs outside market hours
+        id: offhours
+        if: github.event_name == 'schedule' && steps.ctx.outputs.in_market != 'true'
+        run: |
+          echo "skip=true" >> "$GITHUB_OUTPUT"
+          echo "::notice::Scheduled run arrived outside 09:00-20:00 IST; skipping to avoid stale alerts."
+
+      - name: Skip duplicate full scan for today
+        id: duplicate
+        if: steps.ctx.outputs.force != 'true' && steps.offhours.outputs.skip != 'true'
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          count=$(gh api "repos/$GITHUB_REPOSITORY/actions/workflows/full_scanner.yml/runs?status=success&per_page=100" \
+            --jq "[.workflow_runs[] | select(.id != ${{ github.run_id }}) | select(.created_at >= \"${{ steps.ctx.outputs.day_start }}\" and .created_at < \"${{ steps.ctx.outputs.day_end }}\")] | length")
+          echo "Successful full scans today: $count"
+          if [ "${count:-0}" -gt 0 ]; then
+            echo "skip=true" >> "$GITHUB_OUTPUT"
+            echo "::notice::A full-universe scan already succeeded today; skipping duplicate 15-min trigger. Use force=true to override."
+          fi
+
+      - name: Prepare alert state directory
+        if: steps.offhours.outputs.skip != 'true' && steps.duplicate.outputs.skip != 'true'
+        run: mkdir -p .alert-state
+
+      - name: Restore sent-alert registry
+        id: alert_cache
+        if: steps.offhours.outputs.skip != 'true' && steps.duplicate.outputs.skip != 'true'
+        uses: actions/cache/restore@v4
+        with:
+          path: .alert-state
+          key: alerts-${{ steps.ctx.outputs.ist_date }}-full-${{ github.run_id }}
+          restore-keys: |
+            alerts-${{ steps.ctx.outputs.ist_date }}-
+
       - name: Run full-universe scanner
+        if: steps.offhours.outputs.skip != 'true' && steps.duplicate.outputs.skip != 'true'
         env:
           TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
           TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
           # Dhan is the PRIMARY data source; yfinance is the fallback.
           DHAN_CLIENT_ID: ${{ secrets.DHAN_CLIENT_ID }}
           DHAN_ACCESS_TOKEN: ${{ secrets.DHAN_ACCESS_TOKEN }}
+          # Shared with daily_scanner.yml so EOD scans do not re-send alerts
+          # that the intraday scan already announced today.
+          ALERT_STATE_FILE: .alert-state/sent_alerts.json
+          ALERT_DEDUP: '1'
           # Optional: cap symbols for a quick test run via manual dispatch.
           # MAX_SYMBOLS: '100'
         run: |
           python full_scanner.py
 
       - name: Upload full-scan artifacts
+        if: steps.offhours.outputs.skip != 'true' && steps.duplicate.outputs.skip != 'true'
         uses: actions/upload-artifact@v4
         with:
           name: full-scan-${{ github.run_id }}
@@ -71,3 +135,10 @@ jobs:
             full_shake_green_today_*.csv
             full_recent_reversals_fired_*.csv
           if-no-files-found: ignore
+
+      - name: Save sent-alert registry
+        if: always() && steps.offhours.outputs.skip != 'true' && steps.duplicate.outputs.skip != 'true'
+        uses: actions/cache/save@v4
+        with:
+          path: .alert-state
+          key: ${{ steps.alert_cache.outputs.cache-primary-key }}

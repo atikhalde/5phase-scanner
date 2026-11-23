@@ -5,15 +5,23 @@ on:
     # Every 15 min during NSE market hours IST 9:30-15:30 = 04:00-10:00 UTC Mon-Fri
     - cron: '0,15,30,45 4-9 * * 1-5'
     - cron: '0,15,30,45 10 * * 1-5'  # 10:00-10:45 UTC covers till 15:30 IST + buffer
-    # Daily EOD watchlist at 15:45 IST = 10:15 UTC
-    - cron: '15 10 * * 1-5'
   workflow_dispatch:  # allow manual trigger
+    inputs:
+      force:
+        description: 'Run even if this 15-min slot already produced a successful scan'
+        type: boolean
+        default: false
 
-# Only one scan at a time: a 500-symbol scan can take >15 min, and overlapping
-# runs would send duplicate Telegram alerts. Newest trigger wins.
+# Only one scan at a time. A 500-symbol scan takes ~7 min. We no longer cancel
+# in-progress runs: a duplicate trigger is handled by the slot gate below, so
+# the first scan is allowed to finish and save its alert-dedup state.
 concurrency:
   group: daily-scan
-  cancel-in-progress: true
+  cancel-in-progress: false
+
+permissions:
+  contents: read
+  actions: read   # needed to check for an already-successful run in this slot
 
 jobs:
   scan:
@@ -33,19 +41,78 @@ jobs:
           pip install --upgrade pip
           pip install -r requirements.txt
 
+      - name: Compute IST session context
+        id: ctx
+        run: |
+          python3 - <<'PY' >> "$GITHUB_OUTPUT"
+          from datetime import datetime, timedelta, timezone
+          from zoneinfo import ZoneInfo
+
+          now = datetime.now(ZoneInfo('Asia/Kolkata'))
+          slot = now.replace(minute=(now.minute // 15) * 15, second=0, microsecond=0)
+          start = slot.astimezone(timezone.utc)
+          end = (slot + timedelta(minutes=15)).astimezone(timezone.utc)
+          minutes = now.hour * 60 + now.minute
+          in_market = now.weekday() < 5 and 9 * 60 <= minutes <= 16 * 60
+          print(f"ist_date={now.date().isoformat()}")
+          print(f"slot_start={start.strftime('%Y-%m-%dT%H:%M:%SZ')}")
+          print(f"slot_end={end.strftime('%Y-%m-%dT%H:%M:%SZ')}")
+          print(f"in_market={'true' if in_market else 'false'}")
+          print("force=${{ github.event.inputs.force || 'false' }}")
+          PY
+
+      - name: Skip delayed scheduled runs outside market hours
+        id: offhours
+        if: github.event_name == 'schedule' && steps.ctx.outputs.in_market != 'true'
+        run: |
+          echo "skip=true" >> "$GITHUB_OUTPUT"
+          echo "::notice::Scheduled run arrived outside 09:00-16:00 IST; skipping to avoid stale alerts."
+
+      - name: Skip duplicate trigger for this 15-min slot
+        id: duplicate
+        if: steps.ctx.outputs.force != 'true' && steps.offhours.outputs.skip != 'true'
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          count=$(gh api "repos/$GITHUB_REPOSITORY/actions/workflows/daily_scanner.yml/runs?status=success&per_page=100" \
+            --jq "[.workflow_runs[] | select(.id != ${{ github.run_id }}) | select(.created_at >= \"${{ steps.ctx.outputs.slot_start }}\" and .created_at < \"${{ steps.ctx.outputs.slot_end }}\")] | length")
+          echo "Successful runs in this slot: $count"
+          if [ "${count:-0}" -gt 0 ]; then
+            echo "skip=true" >> "$GITHUB_OUTPUT"
+            echo "::notice::A daily scan already succeeded in this 15-min slot; skipping duplicate."
+          fi
+
+      - name: Prepare alert state directory
+        if: steps.offhours.outputs.skip != 'true' && steps.duplicate.outputs.skip != 'true'
+        run: mkdir -p .alert-state
+
+      - name: Restore sent-alert registry
+        id: alert_cache
+        if: steps.offhours.outputs.skip != 'true' && steps.duplicate.outputs.skip != 'true'
+        uses: actions/cache/restore@v4
+        with:
+          path: .alert-state
+          key: alerts-${{ steps.ctx.outputs.ist_date }}-daily-${{ github.run_id }}
+          restore-keys: |
+            alerts-${{ steps.ctx.outputs.ist_date }}-
+
       - name: Run daily scanner
+        if: steps.offhours.outputs.skip != 'true' && steps.duplicate.outputs.skip != 'true'
         env:
           TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
           TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
-          # Dhan is the PRIMARY data source. These secrets are defined in the
-          # repo but were NOT passed to the job before, so Dhan always failed
-          # in live runs and the scanner fell back to stale cached data.
+          # Dhan is the PRIMARY data source; yfinance is the fallback.
           DHAN_CLIENT_ID: ${{ secrets.DHAN_CLIENT_ID }}
           DHAN_ACCESS_TOKEN: ${{ secrets.DHAN_ACCESS_TOKEN }}
+          # Shared with full_scanner.yml so EOD scans do not re-send alerts
+          # that the intraday scan already announced today.
+          ALERT_STATE_FILE: .alert-state/sent_alerts.json
+          ALERT_DEDUP: '1'
         run: |
           python daily_scanner.py
 
       - name: Upload daily artifacts
+        if: steps.offhours.outputs.skip != 'true' && steps.duplicate.outputs.skip != 'true'
         uses: actions/upload-artifact@v4
         with:
           name: daily-scan-${{ github.run_id }}
@@ -56,3 +123,10 @@ jobs:
             reversals_today_*.csv
             shake_green_today_*.csv
           if-no-files-found: ignore
+
+      - name: Save sent-alert registry
+        if: always() && steps.offhours.outputs.skip != 'true' && steps.duplicate.outputs.skip != 'true'
+        uses: actions/cache/save@v4
+        with:
+          path: .alert-state
+          key: ${{ steps.alert_cache.outputs.cache-primary-key }}

@@ -61,6 +61,15 @@ from telegram_helper import (
     format_watchlist,
     format_recent_reversals_fired,
 )
+from alert_state import (
+    load_state as load_alert_state,
+    save_state as save_alert_state,
+    event_key,
+    summary_key,
+    failure_key,
+    is_new as alert_is_new,
+    mark_sent as mark_alert_sent,
+)
 
 # Reuse the data-fetch + freshness/time helpers from the existing daily
 # scanner WITHOUT modifying it. (Importing daily_scanner is side-effect free:
@@ -173,6 +182,26 @@ def load_full_eq_symbols():
 def run_full_scan():
     bot_token = os.getenv("TELEGRAM_BOT_TOKEN")
     chat_id = os.getenv("TELEGRAM_CHAT_ID")
+
+    # DEDUP: share the registry with daily_scanner.py (same state file in the
+    # workflows) so an EOD full scan never re-announces a Nifty500 event that
+    # the intraday scan already sent today.
+    alert_registry = load_alert_state()
+    new_alerts_sent = 0
+
+    def send_once(kind, trade, msg, key=None):
+        nonlocal new_alerts_sent
+        k = key if key is not None else event_key(kind, trade)
+        if not alert_is_new(alert_registry, k):
+            print(f"DEDUP: already sent {k}")
+            return False
+        print(msg)
+        ok = send_telegram_message(bot_token, chat_id, msg)
+        if ok:
+            mark_alert_sent(alert_registry, k)
+            new_alerts_sent += 1
+        return ok
+
     symbols = load_full_eq_symbols()
     max_syms = os.getenv("MAX_SYMBOLS")  # optional test limit
     if max_syms:
@@ -315,14 +344,14 @@ def run_full_scan():
             "Check Dhan credentials (DHAN_CLIENT_ID/DHAN_ACCESS_TOKEN in workflow env) "
             "and yfinance/yahoo availability."
         )
-        print(msg)
-        send_telegram_message(bot_token, chat_id, msg)
+        send_once("failure", {}, msg, key=failure_key())
         pd.DataFrame(breakout_today).to_csv(f"full_breakouts_today_{today_str}.csv", index=False)
         pd.DataFrame(shakeout_today).to_csv(f"full_shakeouts_today_{today_str}.csv", index=False)
         pd.DataFrame(reversal_today).to_csv(f"full_reversals_today_{today_str}.csv", index=False)
         pd.DataFrame(shake_green_today).to_csv(f"full_shake_green_today_{today_str}.csv", index=False)
         pd.DataFrame(final_watchlist).to_csv(f"full_daily_watchlist_{today_str}.csv", index=False)
-        print("Full scan done (coverage guard - no live data)")
+        save_alert_state(alert_registry)
+        print(f"Full scan done (coverage guard - no live data; new alerts {new_alerts_sent})")
         return
 
     # ------------------------------------------------------------------
@@ -364,30 +393,24 @@ def run_full_scan():
     recent_msg = format_recent_reversals_fired(recent_reversals_fired)
 
     full_msg = header + "\n" + watchlist_msg + "\n\n" + recent_msg + stale_note
-    print(full_msg)
-    send_telegram_message(bot_token, chat_id, full_msg)
+    send_once("summary", {}, full_msg,
+              key=summary_key(watchlist_msg, recent_msg, stale_note))
 
     if breakout_today:
         for tr in breakout_today:
-            msg = format_breakout_alert(tr, tr['ticker'])
-            print(msg)
-            send_telegram_message(bot_token, chat_id, msg)
+            send_once("breakout", tr, format_breakout_alert(tr, tr['ticker']))
     else:
         print(f"🔍 No new breakouts today {today_str}")
 
     if shakeout_today:
         for tr in shakeout_today:
-            msg = format_shakeout_alert(tr, tr['ticker'])
-            print(msg)
-            send_telegram_message(bot_token, chat_id, msg)
+            send_once("shakeout", tr, format_shakeout_alert(tr, tr['ticker']))
     else:
         print(f"📉 No shakeout / pullback touches today {today_str}")
 
     if reversal_today:
         for tr in reversal_today:
-            msg = format_reversal_alert(tr, tr['ticker'])
-            print(msg)
-            send_telegram_message(bot_token, chat_id, msg)
+            send_once("reversal", tr, format_reversal_alert(tr, tr['ticker']))
     else:
         print(f"✅ No reversal entries today {today_str}")
 
@@ -395,9 +418,7 @@ def run_full_scan():
     # latest bar.  Sent independently of the strict reversal alert above.
     if shake_green_today:
         for tr in shake_green_today:
-            msg = format_shake_green_alert(tr, tr['ticker'])
-            print(msg)
-            send_telegram_message(bot_token, chat_id, msg)
+            send_once("shake_green", tr, format_shake_green_alert(tr, tr['ticker']))
     else:
         print(f"🟢 No shake-low → next-day-green setups today {today_str}")
 
@@ -407,7 +428,8 @@ def run_full_scan():
     pd.DataFrame(shakeout_today).to_csv(f"full_shakeouts_today_{today_str}.csv", index=False)
     pd.DataFrame(reversal_today).to_csv(f"full_reversals_today_{today_str}.csv", index=False)
     pd.DataFrame(shake_green_today).to_csv(f"full_shake_green_today_{today_str}.csv", index=False)
-    print("Full scan done")
+    save_alert_state(alert_registry)
+    print(f"Full scan done (new alerts sent: {new_alerts_sent})")
 
 
 if __name__ == "__main__":

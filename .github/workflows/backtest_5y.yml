@@ -6,6 +6,16 @@ on:
     # Weekly on Sunday at 2 AM UTC to refresh backtest PDF
     - cron: '0 2 * * 0'
 
+# A weekly refresh should never overlap with a manually dispatched one; both
+# write the same CSV/PDF and push them to the repo.
+concurrency:
+  group: backtest-5y
+  cancel-in-progress: false
+
+permissions:
+  contents: write   # the optional report-commit step pushes to this branch
+  actions: read
+
 jobs:
   backtest:
     runs-on: ubuntu-latest
