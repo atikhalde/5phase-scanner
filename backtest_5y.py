@@ -141,6 +141,7 @@ def run_backtest():
         time.sleep(2)
 
     df_trades=pd.DataFrame(all_trades)
+    stale_report = False
     # FALLBACK: if no trades due to Yahoo rate limit blocking GitHub Actions, use cached sample
     if df_trades.empty:
         print("No trades found due to Yahoo rate limit - using cached sample_1291_trades.csv")
@@ -148,9 +149,10 @@ def run_backtest():
         for fp in fallback_paths:
             if os.path.exists(fp):
                 print(f"Loading fallback {fp}")
-                df_trades=pd.read_csv(fp)
-                # Ensure it has ticker column first
-                if 'ticker' in df_trades.columns:
+                cached=pd.read_csv(fp)
+                if 'ticker' in cached.columns:
+                    df_trades=cached
+                    stale_report=True
                     break
 
     if df_trades.empty:
@@ -216,6 +218,9 @@ def run_backtest():
 
     story.append(Paragraph(f"5-Phase Pattern Backtest — Last 5 Years ({start_date} to {datetime.now().date()})", styles['Title']))
     story.append(Spacer(1,12))
+    if stale_report:
+        story.append(Paragraph("⚠️ STALE CACHE: live downloads failed; this report uses sample_1291_trades.csv, NOT fresh market data.", styles['Normal']))
+        story.append(Spacer(1,8))
     story.append(Paragraph(f"Universe: Nifty500 ({len(symbols)} symbols) | Total Trades: {len(df_trades)} | Unique Tickers: {df_trades['ticker'].nunique() if not df_trades.empty else 0}", styles['Normal']))
     story.append(Paragraph(f"Trades per Month: {len(df_trades)/60:.2f} | Avg Max Gain 130d (sample {len(perf_df)}): {avg_max_gain:.1f}% | TP1 Hit: {tp1_rate*100:.1f}% | TP2 Hit: {tp2_rate*100:.1f}%", styles['Normal']))
     story.append(Spacer(1,12))

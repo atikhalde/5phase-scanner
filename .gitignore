@@ -1,5 +1,6 @@
 __pycache__/
 *.pyc
+.alert-state/
 daily_watchlist_*.csv
 breakouts_today_*.csv
 shakeouts_today_*.csv

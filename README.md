@@ -19,7 +19,7 @@ This fixes:
 ## Workflows
 
 ### 1. Daily Scanner (`daily_scanner.yml`)
-- **Schedule:** Every 15 min during NSE market hours 9:30-15:30 IST (04:00-10:00 UTC Mon-Fri) + EOD 15:45 IST (10:15 UTC)
+- **Schedule:** Every 15 min during NSE market hours 9:30-15:30 IST (04:00-10:00 UTC Mon-Fri) + EOD 15:45 IST (10:15 UTC). A duplicate trigger inside the same 15-minute slot is skipped; use manual dispatch with `force=true` to override. Delayed scheduled runs arriving outside 09:00-16:00 IST are skipped instead of sending stale alerts.
 - **Universe:** Nifty500 (as per your selection) — change in `daily_scanner.py` to full EQ 2075 if needed
 - **Alerts:**
   - Watchlist: breakout waiting shakeout / reversal
@@ -37,7 +37,7 @@ This fixes:
 ### 2. Full NSE EQ Scanner (`full_scanner.py`) — NEW
 > ⚙️ **Activate the workflow:** the CI file is provided at `workflow_templates/full_scanner.yml`. Copy it to `.github/workflows/full_scanner.yml` and commit (this must be done by a user/token with the GitHub `workflows` permission — the automated agent cannot create workflow files). Once committed it runs on the schedule below. You can also just run `python full_scanner.py` anytime.
 
-- **Schedule:** Once per trading day at EOD 15:45 IST (10:15 UTC Mon-Fri) + manual dispatch
+- **Schedule:** Once per trading day at 17:00 IST (11:30 UTC Mon-Fri), after the daily EOD scan has finished, + manual dispatch. Only one successful full scan per IST date is allowed; further 15-minute dispatches are skipped (use `force=true` to override). This stops queued runs from being dropped and stops duplicate EOD alerts.
 - **Universe:** FULL NSE cash equity (~2000 symbols, `SERIES == EQ` from NSE `EQUITY_L.csv`) — NOT just Nifty500
 - **Why:** `daily_scanner.py` only scans Nifty500, so stocks outside that index (e.g. **TVSSRICHAK** / TVS Srichakra) are never fetched and can never fire an alert — even though the full-universe backtest produced trades for them. This scanner covers them.
 - **Logic:** *Identical* 5-phase engine as the daily scanner. `full_scanner.py` reuses `scanner.py`, the data-fetch/freshness helpers from `daily_scanner.py`, and the formatters from `telegram_helper.py` — nothing in the existing files is modified.
@@ -100,11 +100,33 @@ Tests: `python3 test_shake_green_alert.py` (49 checks, including the
 ALEMBICLTD geometry, "T+1 only", "red bar → silent", "both alerts fire", and
 end-to-end runs of both scanners with the data fetch stubbed out).
 
+## Alert deduplication (no more repeated Telegram messages)
+
+The scanners re-detect the same event on every run: a 09:30 breakout is still
+"today's breakout" at 14:45, and the EOD full scan sees the same bars again.
+`alert_state.py` keeps a small JSON registry of already-announced events:
+`breakout|ticker|date`, `shakeout|ticker|breakout|shake-date`,
+`reversal|ticker|date`, `shake_green|ticker|shake-date|green-date`, plus a
+content hash for the summary report and a once-per-day key for data-failure
+alerts. Both workflows restore this file from the Actions cache (shared key
+prefix `alerts-<IST date>-`) and save it after each run, so the full scanner
+cannot re-send an alert the daily scanner already delivered. CSV artifacts
+still contain every detection — only the Telegram sends are deduplicated.
+
+- `ALERT_DEDUP=0` disables deduplication for local debugging.
+- `ALERT_STATE_FILE` overrides the registry path (default `.alert-state/sent_alerts.json`).
+- Manual workflow dispatch supports `force=true` to bypass the duplicate-scan gates.
+
+Tests: `python3 test_alert_dedup.py` (18 checks, including two consecutive
+scanner runs and cross-scanner suppression).
+
 ## Files
 - `scanner.py` — exact same conditions
 - `daily_scanner.py` — daily watchlist + live alerts (Nifty500)
 - `full_scanner.py` — same logic, FULL NSE EQ (~2000 symbols); standalone, reuses `scanner.py`/`daily_scanner.py`/`telegram_helper.py` without modifying them
 - `telegram_helper.py` — Telegram sender
+- `alert_state.py` — once-per-session Telegram alert deduplication registry
+- `test_alert_dedup.py` — tests for duplicate-alert suppression
 - `test_shake_green_alert.py` — tests for the Shake-Low → Green Next Day add-on
 - `backtest_5y.py` — 5Y backtest + PDF
 - `.github/workflows/daily_scanner.yml`
