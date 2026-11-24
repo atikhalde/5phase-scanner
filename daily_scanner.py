@@ -77,6 +77,22 @@ def expected_trading_day():
         d -= timedelta(days=1)
     return d
 
+def has_current_session_data(data_date, today=None):
+    """Require a bar dated today before sending any live Telegram report.
+
+    The looser ``is_fresh`` tolerance is useful for counting data-source
+    coverage, but it must not make yesterday's close look like today's scan
+    on an NSE holiday or when the feed has not published today's bar yet.
+    """
+    if data_date is None:
+        return False
+    try:
+        observed = pd.to_datetime(data_date).date()
+        session_date = today or ist_today()
+        return observed == session_date
+    except (TypeError, ValueError, OverflowError):
+        return False
+
 def trading_days_between(d1, d2):
     """Number of Mon-Fri days between d1 (older) and d2 (newer)."""
     n = 0
@@ -500,6 +516,18 @@ def run_daily_scan():
         pd.DataFrame(final_watchlist).to_csv(f"daily_watchlist_{today_str}.csv", index=False)
         save_alert_state(alert_registry)
         print(f"Daily scan done (coverage guard - no live data; new alerts {new_alerts_sent})")
+        return
+
+    # Weekday freshness alone is insufficient: NSE holidays are weekdays too,
+    # and the one-day freshness tolerance can otherwise replay the prior close
+    # as a new report/alert. Never publish actionable output without a bar dated
+    # today in IST. This also safely silences manual dispatches on closed days.
+    if not has_current_session_data(latest_data_date):
+        print(
+            f"No current-session bar (latest data date {latest_data_date}; "
+            f"IST date {today_str}); suppressing report and alerts."
+        )
+        save_alert_state(alert_registry)
         return
 
     # ------------------------------------------------------------------

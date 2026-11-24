@@ -30,8 +30,20 @@ def check(condition, message):
         print(f"  FAIL: {message}")
 
 
+def test_current_session_data_guard():
+    print("[1] stale prior-session data is not reportable")
+    today = pd.Timestamp("2026-11-24").date()
+    check(daily_scanner.has_current_session_data(today, today=today),
+          "today-dated bar is eligible")
+    check(not daily_scanner.has_current_session_data(
+        pd.Timestamp("2026-11-23").date(), today=today),
+          "previous session bar is suppressed on a closed weekday")
+    check(not daily_scanner.has_current_session_data(None, today=today),
+          "missing data date is suppressed")
+
+
 def test_state_basics():
-    print("[1] alert_state registry")
+    print("[2] alert_state registry")
     with tempfile.TemporaryDirectory() as td:
         path = os.path.join(td, "sent_alerts.json")
         old_path = os.environ.get("ALERT_STATE_FILE")
@@ -114,7 +126,7 @@ def run_scanner_twice(module, symbol, df):
 
 
 def test_end_to_end_daily_and_full_share_state():
-    print("[2] repeated scans do not re-send the same Telegram alerts")
+    print("[3] repeated scans do not re-send the same Telegram alerts")
     today = str(pd.Timestamp.today().date())
     df = make_shake_green_df(i_off=17, last='green', end_date=today)
     symbol = "ALEMBICLTD"
@@ -171,6 +183,7 @@ def test_end_to_end_daily_and_full_share_state():
 
 
 def main():
+    test_current_session_data_guard()
     test_state_basics()
     test_end_to_end_daily_and_full_share_state()
     print(f"\n{PASSED} passed, {FAILED} failed")
