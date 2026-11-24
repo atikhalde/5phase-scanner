@@ -19,7 +19,7 @@ This fixes:
 ## Workflows
 
 ### 1. Daily Scanner (`daily_scanner.yml`)
-- **Schedule:** Every 15 min during NSE market hours 9:30-15:30 IST (04:00-10:00 UTC Mon-Fri) + EOD 15:45 IST (10:15 UTC). A duplicate trigger inside the same 15-minute slot is skipped; use manual dispatch with `force=true` to override. Delayed scheduled runs arriving outside 09:00-16:00 IST are skipped instead of sending stale alerts.
+- **Schedule:** Every 15 min during NSE market hours 9:30-15:30 IST (04:00-10:00 UTC Mon-Fri) + EOD 15:45 IST (10:15 UTC). A duplicate trigger inside the same 15-minute slot is skipped; use manual dispatch with `force=true` to override. Delayed scheduled runs arriving outside 09:00-16:00 IST are skipped instead of sending stale alerts. Independently, the scanner suppresses all reports and actionable alerts unless at least one fresh symbol has a bar dated today in IST, preventing yesterday's close from being replayed on weekday market holidays.
 - **Universe:** Nifty500 (as per your selection) — change in `daily_scanner.py` to full EQ 2075 if needed
 - **Alerts:**
   - Watchlist: breakout waiting shakeout / reversal

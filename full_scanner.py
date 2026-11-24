@@ -79,6 +79,7 @@ from daily_scanner import (
     is_fresh,
     last_data_date,
     expected_trading_day,
+    has_current_session_data,
     ist_now,
     ist_today,
     LOOKBACK_YEARS,
@@ -352,6 +353,18 @@ def run_full_scan():
         pd.DataFrame(final_watchlist).to_csv(f"full_daily_watchlist_{today_str}.csv", index=False)
         save_alert_state(alert_registry)
         print(f"Full scan done (coverage guard - no live data; new alerts {new_alerts_sent})")
+        return
+
+    # Weekday freshness alone is insufficient: NSE holidays are weekdays too,
+    # and the one-day freshness tolerance can otherwise replay the prior close
+    # as a new report/alert. Never publish actionable output without a bar dated
+    # today in IST. This also safely silences manual dispatches on closed days.
+    if not has_current_session_data(latest_data_date):
+        print(
+            f"No current-session bar (latest data date {latest_data_date}; "
+            f"IST date {today_str}); suppressing report and alerts."
+        )
+        save_alert_state(alert_registry)
         return
 
     # ------------------------------------------------------------------
